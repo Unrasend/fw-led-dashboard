@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
 
-
 Glyph = tuple[str, str, str, str, str]
 
 _GLYPHS: dict[str, Glyph] = {

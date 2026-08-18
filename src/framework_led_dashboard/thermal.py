@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-
 _CPU_LABELS = {"cpu", "cpu temp", "cpu@4c", "package id 0", "tctl"}
 _CPU_DRIVERS = {"coretemp", "k10temp"}
 
