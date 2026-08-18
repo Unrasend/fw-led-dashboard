@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
 from framework_led_dashboard.life import LIFE_HEIGHT, LIFE_WIDTH, LifeAnimation, evolve
+from framework_led_dashboard.system_metrics import SystemMetricsProvider
 
 
 def _life_grid(*live_cells: tuple[int, int]) -> tuple[tuple[bool, ...], ...]:
@@ -96,3 +99,59 @@ def test_life_reseeds_when_a_short_oscillator_repeats() -> None:
 
     assert animation.step() == vertical_blinker
     assert animation.step() == replacement
+
+
+def test_system_metrics_reads_battery_and_ram_while_cpu_waits_for_second_sample(
+    tmp_path: Path,
+) -> None:
+    proc_stat = tmp_path / "stat"
+    meminfo = tmp_path / "meminfo"
+    capacity = tmp_path / "capacity"
+    proc_stat.write_text("cpu  100 0 50 850 0 0 0 0\n", encoding="utf-8")
+    meminfo.write_text("MemTotal: 1000 kB\nMemAvailable: 250 kB\n", encoding="utf-8")
+    capacity.write_text("48\n", encoding="utf-8")
+    provider = SystemMetricsProvider(
+        proc_stat_path=proc_stat,
+        meminfo_path=meminfo,
+        battery_capacity_path=capacity,
+    )
+
+    metrics = provider.read()
+
+    assert metrics.battery_percent == 48
+    assert metrics.ram_used_percent == 75
+    assert metrics.cpu_percent is None
+
+
+def test_system_metrics_calculates_cpu_usage_from_consecutive_samples(tmp_path: Path) -> None:
+    proc_stat = tmp_path / "stat"
+    meminfo = tmp_path / "meminfo"
+    capacity = tmp_path / "capacity"
+    proc_stat.write_text("cpu  100 0 50 850 0 0 0 0\n", encoding="utf-8")
+    meminfo.write_text("MemTotal: 1000 kB\nMemAvailable: 250 kB\n", encoding="utf-8")
+    capacity.write_text("48\n", encoding="utf-8")
+    provider = SystemMetricsProvider(
+        proc_stat_path=proc_stat,
+        meminfo_path=meminfo,
+        battery_capacity_path=capacity,
+    )
+    provider.read()
+
+    proc_stat.write_text("cpu  150 0 70 880 0 0 0 0\n", encoding="utf-8")
+    metrics = provider.read()
+
+    assert metrics.cpu_percent == pytest.approx(70)
+
+
+def test_system_metrics_returns_unknown_for_missing_or_malformed_sources(tmp_path: Path) -> None:
+    provider = SystemMetricsProvider(
+        proc_stat_path=tmp_path / "missing-stat",
+        meminfo_path=tmp_path / "missing-meminfo",
+        battery_capacity_path=tmp_path / "missing-capacity",
+    )
+
+    metrics = provider.read()
+
+    assert metrics.battery_percent is None
+    assert metrics.cpu_percent is None
+    assert metrics.ram_used_percent is None
