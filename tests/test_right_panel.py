@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from framework_led_dashboard.battery import BatteryMode, BatteryPowerProvider
 from framework_led_dashboard.frame import Frame
 from framework_led_dashboard.pixel_font import draw_text
 from framework_led_dashboard.thermal import CpuTemperatureProvider
@@ -96,3 +97,89 @@ def test_cpu_temperature_returns_unknown_for_bad_values(
     )
 
     assert CpuTemperatureProvider(hwmon_root=tmp_path).read_celsius() is None
+
+
+def _write_battery_files(root: Path, **values: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    for name, value in values.items():
+        (root / name).write_text(f"{value}\n", encoding="utf-8")
+
+
+def test_battery_power_prefers_power_now_while_discharging(tmp_path: Path) -> None:
+    _write_battery_files(
+        tmp_path,
+        status="Discharging",
+        power_now="12360000",
+        current_now="9000000",
+        voltage_now="20000000",
+    )
+
+    reading = BatteryPowerProvider(battery_root=tmp_path).read()
+
+    assert reading.mode is BatteryMode.DISCHARGING
+    assert reading.watts == pytest.approx(12.36)
+
+
+def test_battery_power_falls_back_to_current_times_voltage(tmp_path: Path) -> None:
+    _write_battery_files(
+        tmp_path,
+        status="Discharging",
+        current_now="800000",
+        voltage_now="15000000",
+    )
+
+    reading = BatteryPowerProvider(battery_root=tmp_path).read()
+
+    assert reading.mode is BatteryMode.DISCHARGING
+    assert reading.watts == pytest.approx(12)
+
+
+def test_battery_power_smooths_consecutive_discharge_samples(tmp_path: Path) -> None:
+    _write_battery_files(tmp_path, status="Discharging", power_now="10000000")
+    provider = BatteryPowerProvider(battery_root=tmp_path, smoothing_factor=0.5)
+    assert provider.read().watts == pytest.approx(10)
+
+    (tmp_path / "power_now").write_text("14000000\n", encoding="utf-8")
+
+    assert provider.read().watts == pytest.approx(12)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_mode"),
+    [("Charging", BatteryMode.CHARGING), ("Full", BatteryMode.AC), ("Not charging", BatteryMode.AC)],
+)
+def test_battery_power_reports_non_discharge_states(
+    tmp_path: Path,
+    status: str,
+    expected_mode: BatteryMode,
+) -> None:
+    _write_battery_files(tmp_path, status=status, power_now="12000000")
+
+    reading = BatteryPowerProvider(battery_root=tmp_path).read()
+
+    assert reading.mode is expected_mode
+    assert reading.watts is None
+
+
+def test_battery_power_returns_unknown_for_missing_status(tmp_path: Path) -> None:
+    reading = BatteryPowerProvider(battery_root=tmp_path).read()
+
+    assert reading.mode is BatteryMode.UNKNOWN
+    assert reading.watts is None
+
+
+def test_battery_power_returns_unknown_watts_for_malformed_discharge_data(
+    tmp_path: Path,
+) -> None:
+    _write_battery_files(
+        tmp_path,
+        status="Discharging",
+        power_now="broken",
+        current_now="broken",
+        voltage_now="15000000",
+    )
+
+    reading = BatteryPowerProvider(battery_root=tmp_path).read()
+
+    assert reading.mode is BatteryMode.DISCHARGING
+    assert reading.watts is None
