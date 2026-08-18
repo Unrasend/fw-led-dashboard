@@ -173,57 +173,67 @@ def _draw_fog(grid: Grid, *, frame: int, freezing: bool) -> None:
 def _draw_condition(grid: Grid, *, symbol: WeatherSymbol, frame: int) -> None:
     kind = symbol.kind
     if kind in {WeatherKind.DRIZZLE, WeatherKind.FREEZING_DRIZZLE}:
-        _draw_rain(grid, intensity=symbol.intensity, frame=frame, pixel="L")
+        _draw_precipitation(
+            grid,
+            intensity=symbol.intensity,
+            frame=frame,
+            pixels=("L", "L"),
+        )
         if kind is WeatherKind.FREEZING_DRIZZLE:
             _draw_ice_mark(grid, frame=frame)
     elif kind in {WeatherKind.RAIN, WeatherKind.FREEZING_RAIN, WeatherKind.RAIN_SHOWERS}:
-        _draw_rain(grid, intensity=symbol.intensity, frame=frame, pixel="#")
+        _draw_precipitation(
+            grid,
+            intensity=symbol.intensity,
+            frame=frame,
+            pixels=("#", "#"),
+        )
         if kind is WeatherKind.FREEZING_RAIN:
             _draw_ice_mark(grid, frame=frame)
         if kind is WeatherKind.RAIN_SHOWERS:
             _set(grid, 8 if frame == 0 else 0, 1, "L")
     elif kind in {WeatherKind.SNOW, WeatherKind.SNOW_SHOWERS}:
-        _draw_snow(grid, intensity=symbol.intensity, frame=frame)
+        _draw_precipitation(
+            grid,
+            intensity=symbol.intensity,
+            frame=frame,
+            pixels=("#", "L"),
+        )
         if kind is WeatherKind.SNOW_SHOWERS:
             _set(grid, 8 if frame == 0 else 0, 1, "L")
     elif kind is WeatherKind.SNOW_GRAINS:
-        _draw_snow(grid, intensity=WeatherIntensity.MODERATE, frame=frame, grains=True)
+        _draw_precipitation(
+            grid,
+            intensity=WeatherIntensity.MODERATE,
+            frame=frame,
+            pixels=("L", "L"),
+        )
     elif kind in {WeatherKind.THUNDER, WeatherKind.THUNDER_HAIL}:
+        _draw_precipitation(
+            grid,
+            intensity=symbol.intensity,
+            frame=frame,
+            pixels=("#", "#"),
+        )
         _draw_bolt(grid, frame=frame)
         if kind is WeatherKind.THUNDER_HAIL:
             _draw_hail(grid, intensity=symbol.intensity, frame=frame)
 
 
-def _draw_rain(
+def _draw_precipitation(
     grid: Grid,
     *,
     intensity: WeatherIntensity,
     frame: int,
-    pixel: str,
+    pixels: tuple[str, str],
 ) -> None:
-    positions = (
-        ((1, 5), (4, 6), (7, 5), (2, 7), (6, 7)),
-        ((2, 6), (5, 5), (8, 6), (0, 7), (5, 7)),
+    stroke_starts = (
+        ((0, 5), (3, 5), (6, 5), (1, 6), (5, 6)),
+        ((1, 5), (4, 5), (7, 5), (0, 6), (4, 6)),
     )[frame]
-    for x, y in positions[: _particle_count(intensity)]:
-        _set(grid, x, y, pixel)
-
-
-def _draw_snow(
-    grid: Grid,
-    *,
-    intensity: WeatherIntensity,
-    frame: int,
-    grains: bool = False,
-) -> None:
-    positions = (
-        ((1, 5), (4, 6), (7, 5), (2, 7), (6, 7)),
-        ((2, 6), (5, 5), (8, 6), (0, 7), (5, 7)),
-    )[frame]
-    for index, (x, y) in enumerate(positions[: _particle_count(intensity)]):
-        _set(grid, x, y, "L" if grains else "#")
-        if not grains and index < 2 and x + 1 < 9:
-            _set(grid, x + 1, y, "L")
+    for x, y in stroke_starts[: _particle_count(intensity)]:
+        _set(grid, x, y, pixels[0])
+        _set(grid, x + 1, y + 1, pixels[1])
 
 
 def _draw_ice_mark(grid: Grid, *, frame: int) -> None:

@@ -411,6 +411,56 @@ def test_light_and_heavy_weather_have_different_particle_density(
     assert light != heavy
 
 
+PRECIPITATION_CODES = (
+    51,
+    53,
+    55,
+    56,
+    57,
+    61,
+    63,
+    65,
+    66,
+    67,
+    71,
+    73,
+    75,
+    77,
+    80,
+    81,
+    82,
+    85,
+    86,
+    95,
+    96,
+    99,
+)
+
+
+def _descending_strokes(icon: tuple[str, ...]) -> set[tuple[int, int]]:
+    return {
+        (x, y)
+        for y in (5, 6)
+        for x in range(8)
+        if icon[y][x] in {"L", "#"} and icon[y + 1][x + 1] in {"L", "#"}
+    }
+
+
+@pytest.mark.parametrize("weather_code", PRECIPITATION_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_precipitation_uses_moving_diagonal_strokes(
+    weather_code: int,
+    is_day: bool,
+) -> None:
+    symbol = classify_weather_code(weather_code)
+    first = _descending_strokes(weather_icon(symbol, is_day=is_day, frame_index=0))
+    second = _descending_strokes(weather_icon(symbol, is_day=is_day, frame_index=1))
+
+    assert first
+    assert second
+    assert first != second
+
+
 @pytest.mark.parametrize("weather_code", sorted(SUPPORTED_WEATHER_CODES))
 def test_right_panel_renders_every_documented_weather_code(weather_code: int) -> None:
     frame = render_right_panel(

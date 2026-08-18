@@ -17,6 +17,7 @@ performing one visual hardware check.
 approved clear-weather animation phases and the complete right-panel layout.
 `right_weather_partly_cloudy_night_0.txt`, `right_weather_heavy_rain_day_0.txt`, and
 `right_weather_thunder_hail_night_1.txt` cover the night palette, heavy precipitation,
-and the most severe documented WMO state without deriving expectations from renderer output.
+and the most severe documented WMO state. Precipitation examples use moving two-pixel
+diagonal strokes and remain authored independently from renderer output.
 `left_alert_battery_off.txt` and `right_alert_cpu_off.txt` lock the local blanking boundary
 for one critical widget while all unrelated pixels remain unchanged.
