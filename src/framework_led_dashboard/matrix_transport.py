@@ -5,10 +5,9 @@ from collections.abc import Callable, Sequence
 from typing import Protocol, TypeVar
 
 from .device_discovery import DeviceDiscoveryError
+from .frame import FRAME_HEIGHT, FRAME_WIDTH
 
 
-FRAME_WIDTH = 9
-FRAME_HEIGHT = 34
 _FRAMEWORK_MAGIC = bytes([0x32, 0xAC])
 _STAGE_GREYSCALE_COLUMN = 0x07
 _DRAW_GREYSCALE_BUFFER = 0x08
