@@ -7,6 +7,7 @@ name = "framework-led-dashboard"
 version = "0.1.0"
 description = "System dashboard for Framework Laptop LED Matrix input modules"
 requires-python = ">=3.11"
+dependencies = ["pyserial>=3.5,<4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
