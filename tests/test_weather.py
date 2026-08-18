@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from framework_led_dashboard.battery import BatteryMode, BatteryPower
 from framework_led_dashboard.config import LocationConfig
 from framework_led_dashboard.http_json import JsonHttpClient
 from framework_led_dashboard.location import (
@@ -20,11 +21,17 @@ from framework_led_dashboard.location import (
     VpnState,
     timezone_city,
 )
+from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.weather import (
     CachedWeather,
     OpenMeteoWeatherClient,
     WeatherProvider,
     WeatherReading,
+)
+from framework_led_dashboard.weather_icons import (
+    WeatherKind,
+    classify_weather_code,
+    weather_icon,
 )
 
 
@@ -300,6 +307,71 @@ def test_weather_provider_contains_fetch_timeout() -> None:
     provider = WeatherProvider(fetch_weather=timeout)
 
     assert provider.refresh(Coordinates(50.0755, 14.4378, LocationSource.TIMEZONE)) is None
+
+
+@pytest.mark.parametrize(
+    ("weather_code", "kind"),
+    [
+        (0, WeatherKind.CLEAR),
+        (2, WeatherKind.CLOUD),
+        (45, WeatherKind.CLOUD),
+        (61, WeatherKind.RAIN),
+        (82, WeatherKind.RAIN),
+        (71, WeatherKind.SNOW),
+        (86, WeatherKind.SNOW),
+        (95, WeatherKind.THUNDER),
+        (99, WeatherKind.THUNDER),
+    ],
+)
+def test_wmo_weather_codes_map_to_display_groups(
+    weather_code: int,
+    kind: WeatherKind,
+) -> None:
+    assert classify_weather_code(weather_code) is kind
+
+
+@pytest.mark.parametrize("kind", list(WeatherKind))
+def test_every_weather_icon_has_two_deterministic_nine_by_eight_frames(
+    kind: WeatherKind,
+) -> None:
+    first = weather_icon(kind, frame_index=0)
+    second = weather_icon(kind, frame_index=1)
+
+    assert len(first) == len(second) == 8
+    assert all(len(row) == 9 for row in first + second)
+    assert set("".join(first + second)) <= {".", "L", "#"}
+    assert first != second
+    assert weather_icon(kind, frame_index=2) == first
+
+
+def test_right_panel_renders_weather_icon_and_outside_temperature_in_assigned_rows() -> None:
+    frame = render_right_panel(
+        weather=WeatherReading(18.4, 0),
+        weather_frame=0,
+        cpu_temperature_c=54,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
+    ).snapshot()
+
+    assert tuple("".join("#" if pixel else "." for pixel in row) for row in frame[9:14]) == (
+        ".#.###..#",
+        "##.#.#...",
+        ".#.###...",
+        ".#.#.#...",
+        "######...",
+    )
+    assert all(pixel == 0 for row in frame[8:9] + frame[14:18] for pixel in row)
+    assert any(pixel for row in frame[0:8] for pixel in row)
+
+
+def test_right_panel_renders_unknown_weather_temperature_dim_without_icon() -> None:
+    frame = render_right_panel(
+        weather=None,
+        cpu_temperature_c=None,
+        battery_power=BatteryPower(BatteryMode.UNKNOWN),
+    ).snapshot()
+
+    assert all(pixel == 0 for row in frame[0:8] for pixel in row)
+    assert frame[11] == (0, 24, 24, 24, 0, 24, 24, 24, 0)
 
 
 def _probe_name(command: tuple[str, ...]) -> str:

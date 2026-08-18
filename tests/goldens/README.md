@@ -12,5 +12,6 @@ Every file has exactly 34 rows of 9 pixels: all 306 LEDs are reviewed. A deliber
 layout change requires updating the mockup, editing the affected golden by hand, and
 performing one visual hardware check.
 
-`right_local_metrics.txt` covers only the local widgets already implemented. Its weather
-and outside-temperature rows stay dark until the weather design slice adds its own goldens.
+`right_local_metrics.txt` covers local widgets plus the dim unknown-weather state.
+`right_weather_clear_0.txt` and `right_weather_clear_1.txt` independently lock the two
+approved clear-weather animation phases and the complete right-panel layout.

@@ -8,6 +8,7 @@ from framework_led_dashboard.left_panel import render_left_panel
 from framework_led_dashboard.matrix_transport import MatrixTransport
 from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.system_metrics import SystemMetrics
+from framework_led_dashboard.weather import WeatherReading
 
 GOLDEN_DIRECTORY = Path(__file__).parent / "goldens"
 PIXEL_VALUES = {".": 0, "L": 128, "#": 220, "?": 24}
@@ -66,6 +67,15 @@ def _render_right_mockup_example() -> FramePixels:
     ).snapshot()
 
 
+def _render_right_weather_example(frame_index: int) -> FramePixels:
+    return render_right_panel(
+        weather=WeatherReading(temperature_c=18.4, weather_code=0),
+        weather_frame=frame_index,
+        cpu_temperature_c=54,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
+    ).snapshot()
+
+
 def _expected_usb_commands(frame: FramePixels) -> tuple[bytes, ...]:
     stage_commands = tuple(
         bytes([0x32, 0xAC, 0x07, x, *[frame[y][x] for y in range(FRAME_HEIGHT)]])
@@ -90,6 +100,17 @@ def test_right_panel_local_widgets_match_all_306_mockup_pixels() -> None:
     assert actual == expected
 
 
+def test_right_panel_weather_animation_matches_all_306_mockup_pixels() -> None:
+    cases = (
+        (_render_right_weather_example(0), _load_golden("right_weather_clear_0.txt")),
+        (_render_right_weather_example(1), _load_golden("right_weather_clear_1.txt")),
+    )
+
+    for actual, expected in cases:
+        assert sum(len(row) for row in expected) == 306
+        assert actual == expected
+
+
 def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
     cases = (
         ("left", _render_left_mockup_example(), _load_golden("left_dashboard.txt")),
@@ -97,6 +118,16 @@ def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
             "right",
             _render_right_mockup_example(),
             _load_golden("right_local_metrics.txt"),
+        ),
+        (
+            "right-clear-0",
+            _render_right_weather_example(0),
+            _load_golden("right_weather_clear_0.txt"),
+        ),
+        (
+            "right-clear-1",
+            _render_right_weather_example(1),
+            _load_golden("right_weather_clear_1.txt"),
         ),
     )
 

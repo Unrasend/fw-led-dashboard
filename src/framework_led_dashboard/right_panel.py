@@ -5,9 +5,12 @@ import math
 from .battery import BatteryMode, BatteryPower
 from .frame import FRAME_WIDTH, Frame
 from .pixel_font import draw_text, text_width
+from .weather import WeatherReading
+from .weather_icons import draw_weather_icon
 
 VALUE_INTENSITY = 220
 UNKNOWN_INTENSITY = 24
+OUTSIDE_TEMPERATURE_TOP = 9
 CPU_TEMPERATURE_TOP = 18
 POWER_TOP = 27
 
@@ -16,8 +19,21 @@ def render_right_panel(
     *,
     cpu_temperature_c: float | None,
     battery_power: BatteryPower,
+    weather: WeatherReading | None = None,
+    weather_frame: int = 0,
 ) -> Frame:
     frame = Frame()
+    if weather is None:
+        _draw_centered(
+            frame,
+            "--",
+            y=OUTSIDE_TEMPERATURE_TOP,
+            intensity=UNKNOWN_INTENSITY,
+        )
+    else:
+        draw_weather_icon(frame, weather.weather_code, frame_index=weather_frame)
+        _draw_outside_temperature(frame, weather.temperature_c)
+
     cpu_temperature_is_known = cpu_temperature_c is not None and math.isfinite(
         cpu_temperature_c
     )
@@ -61,6 +77,31 @@ def _format_power(power: BatteryPower) -> str:
     if watts is None or not math.isfinite(watts) or watts < 0:
         return "--"
     return f"{min(99, int(watts + 0.5))}W"
+
+
+def _draw_outside_temperature(frame: Frame, temperature_c: float) -> None:
+    rounded = math.floor(temperature_c + 0.5) if temperature_c >= 0 else math.ceil(
+        temperature_c - 0.5
+    )
+    text = str(max(-99, min(99, rounded)))
+    if len(text) <= 2:
+        x = 0 if len(text) == 2 else 2
+        draw_text(
+            frame,
+            text,
+            x=x,
+            y=OUTSIDE_TEMPERATURE_TOP,
+            intensity=VALUE_INTENSITY,
+        )
+        frame.set_pixel(8, OUTSIDE_TEMPERATURE_TOP, VALUE_INTENSITY)
+        return
+    draw_text(
+        frame,
+        text,
+        x=0,
+        y=OUTSIDE_TEMPERATURE_TOP,
+        intensity=VALUE_INTENSITY,
+    )
 
 
 def _draw_centered(frame: Frame, text: str, *, y: int, intensity: int) -> None:

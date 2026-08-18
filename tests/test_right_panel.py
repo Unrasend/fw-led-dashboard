@@ -257,4 +257,4 @@ def test_right_panel_keeps_local_widgets_inside_assigned_rows() -> None:
     ).snapshot()
 
     lit_rows = {y for y, row in enumerate(frame) if any(row)}
-    assert lit_rows <= set(range(18, 23)) | set(range(27, 32))
+    assert lit_rows <= set(range(9, 14)) | set(range(18, 23)) | set(range(27, 32))
