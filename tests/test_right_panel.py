@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from framework_led_dashboard.battery import BatteryMode, BatteryPowerProvider
+from framework_led_dashboard.battery import BatteryMode, BatteryPower, BatteryPowerProvider
 from framework_led_dashboard.frame import Frame
 from framework_led_dashboard.pixel_font import draw_text
+from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.thermal import CpuTemperatureProvider
 
 
@@ -183,3 +184,77 @@ def test_battery_power_returns_unknown_watts_for_malformed_discharge_data(
 
     assert reading.mode is BatteryMode.DISCHARGING
     assert reading.watts is None
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected_text", "expected_x", "expected_spacing", "intensity"),
+    [
+        (54, "C54", 0, 0, 220),
+        (105, "105", 0, 0, 220),
+        (None, "--", 1, 1, 24),
+        (float("nan"), "--", 1, 1, 24),
+    ],
+)
+def test_right_panel_renders_cpu_temperature_in_rows_eighteen_to_twenty_two(
+    temperature: float | None,
+    expected_text: str,
+    expected_x: int,
+    expected_spacing: int,
+    intensity: int,
+) -> None:
+    actual = render_right_panel(
+        cpu_temperature_c=temperature,
+        battery_power=BatteryPower(mode=BatteryMode.UNKNOWN),
+    ).snapshot()
+    expected = Frame()
+    draw_text(
+        expected,
+        expected_text,
+        x=expected_x,
+        y=18,
+        spacing=expected_spacing,
+        intensity=intensity,
+    )
+
+    assert actual[18:23] == expected.snapshot()[18:23]
+
+
+@pytest.mark.parametrize(
+    ("power", "expected_text", "expected_x", "expected_spacing", "intensity"),
+    [
+        (BatteryPower(BatteryMode.DISCHARGING, 12.4), "12W", 0, 0, 220),
+        (BatteryPower(BatteryMode.CHARGING), "CHG", 0, 0, 220),
+        (BatteryPower(BatteryMode.AC), "AC", 1, 1, 220),
+        (BatteryPower(BatteryMode.UNKNOWN), "--", 1, 1, 24),
+        (BatteryPower(BatteryMode.DISCHARGING), "--", 1, 1, 24),
+    ],
+)
+def test_right_panel_renders_power_state_in_rows_twenty_seven_to_thirty_one(
+    power: BatteryPower,
+    expected_text: str,
+    expected_x: int,
+    expected_spacing: int,
+    intensity: int,
+) -> None:
+    actual = render_right_panel(cpu_temperature_c=None, battery_power=power).snapshot()
+    expected = Frame()
+    draw_text(
+        expected,
+        expected_text,
+        x=expected_x,
+        y=27,
+        spacing=expected_spacing,
+        intensity=intensity,
+    )
+
+    assert actual[27:32] == expected.snapshot()[27:32]
+
+
+def test_right_panel_keeps_local_widgets_inside_assigned_rows() -> None:
+    frame = render_right_panel(
+        cpu_temperature_c=105,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12),
+    ).snapshot()
+
+    lit_rows = {y for y, row in enumerate(frame) if any(row)}
+    assert lit_rows <= set(range(18, 23)) | set(range(27, 32))
