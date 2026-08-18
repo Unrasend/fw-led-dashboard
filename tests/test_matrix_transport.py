@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from framework_led_dashboard.matrix_transport import (
@@ -100,6 +103,27 @@ def test_transport_keeps_one_serial_connection_for_multiple_frames() -> None:
 
     transport.close()
     assert serial_connection.closed is True
+
+
+def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeSerial()
+    opened_with: dict[str, object] = {}
+
+    def open_serial(path: str, baud_rate: int, **options: object) -> FakeSerial:
+        opened_with.update(path=path, baud_rate=baud_rate, **options)
+        return connection
+
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=open_serial))
+    transport = MatrixTransport(
+        identity="stable-left",
+        path_resolver=lambda identity: f"/dev/by-id/{identity}",
+    )
+
+    transport.write_frame([[0] * 9 for _ in range(34)])
+
+    assert opened_with["write_timeout"] >= 2.0
 
 
 def test_write_error_closes_connection_then_resolves_same_identity_after_backoff() -> None:

@@ -13,7 +13,8 @@ _FRAMEWORK_MAGIC = bytes([0x32, 0xAC])
 _STAGE_GREYSCALE_COLUMN = 0x07
 _DRAW_GREYSCALE_BUFFER = 0x08
 _BAUD_RATE = 115_200
-_SERIAL_TIMEOUT_SECONDS = 0.1
+_SERIAL_READ_TIMEOUT_SECONDS = 0.1
+_SERIAL_WRITE_TIMEOUT_SECONDS = 2.0
 
 
 class TransportError(RuntimeError):
@@ -176,6 +177,6 @@ def _open_serial(path: str) -> SerialConnection:
     return serial.Serial(
         path,
         _BAUD_RATE,
-        timeout=_SERIAL_TIMEOUT_SECONDS,
-        write_timeout=_SERIAL_TIMEOUT_SECONDS,
+        timeout=_SERIAL_READ_TIMEOUT_SECONDS,
+        write_timeout=_SERIAL_WRITE_TIMEOUT_SECONDS,
     )
