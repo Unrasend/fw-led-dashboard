@@ -3,12 +3,13 @@ from __future__ import annotations
 from enum import Enum
 
 from .frame import Frame
+from .weather_codes import WeatherKind, classify_weather_code
 
 Icon = tuple[str, str, str, str, str, str, str, str]
 ICON_INTENSITIES = {"L": 128, "#": 220}
 
 
-class WeatherKind(Enum):
+class _IconGroup(Enum):
     CLEAR = "clear"
     CLOUD = "cloud"
     RAIN = "rain"
@@ -16,8 +17,8 @@ class WeatherKind(Enum):
     THUNDER = "thunder"
 
 
-_ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
-    WeatherKind.CLEAR: (
+_ICONS: dict[_IconGroup, tuple[Icon, Icon]] = {
+    _IconGroup.CLEAR: (
         (
             "....L....",
             ".L..L..L.",
@@ -39,7 +40,7 @@ _ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
             "....L....",
         ),
     ),
-    WeatherKind.CLOUD: (
+    _IconGroup.CLOUD: (
         (
             "....##...",
             "...#..#..",
@@ -61,7 +62,7 @@ _ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
             ".LL..LL..",
         ),
     ),
-    WeatherKind.RAIN: (
+    _IconGroup.RAIN: (
         (
             "....##...",
             "...#..#..",
@@ -83,7 +84,7 @@ _ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
             "..#...#..",
         ),
     ),
-    WeatherKind.SNOW: (
+    _IconGroup.SNOW: (
         (
             "....##...",
             "...#..#..",
@@ -105,7 +106,7 @@ _ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
             "...L...L.",
         ),
     ),
-    WeatherKind.THUNDER: (
+    _IconGroup.THUNDER: (
         (
             "....##...",
             "...#..#..",
@@ -130,24 +131,33 @@ _ICONS: dict[WeatherKind, tuple[Icon, Icon]] = {
 }
 
 
-def classify_weather_code(weather_code: int) -> WeatherKind:
-    if weather_code == 0:
-        return WeatherKind.CLEAR
-    if weather_code in {71, 73, 75, 77, 85, 86}:
-        return WeatherKind.SNOW
-    if weather_code in {95, 96, 99}:
-        return WeatherKind.THUNDER
-    if weather_code in {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82}:
-        return WeatherKind.RAIN
-    return WeatherKind.CLOUD
+_ICON_GROUPS = {
+    WeatherKind.CLEAR: _IconGroup.CLEAR,
+    WeatherKind.MAINLY_CLEAR: _IconGroup.CLEAR,
+    WeatherKind.PARTLY_CLOUDY: _IconGroup.CLOUD,
+    WeatherKind.OVERCAST: _IconGroup.CLOUD,
+    WeatherKind.FOG: _IconGroup.CLOUD,
+    WeatherKind.RIME_FOG: _IconGroup.CLOUD,
+    WeatherKind.DRIZZLE: _IconGroup.RAIN,
+    WeatherKind.FREEZING_DRIZZLE: _IconGroup.RAIN,
+    WeatherKind.RAIN: _IconGroup.RAIN,
+    WeatherKind.FREEZING_RAIN: _IconGroup.RAIN,
+    WeatherKind.RAIN_SHOWERS: _IconGroup.RAIN,
+    WeatherKind.SNOW: _IconGroup.SNOW,
+    WeatherKind.SNOW_GRAINS: _IconGroup.SNOW,
+    WeatherKind.SNOW_SHOWERS: _IconGroup.SNOW,
+    WeatherKind.THUNDER: _IconGroup.THUNDER,
+    WeatherKind.THUNDER_HAIL: _IconGroup.THUNDER,
+}
 
 
 def weather_icon(kind: WeatherKind, *, frame_index: int) -> Icon:
-    return _ICONS[kind][frame_index % 2]
+    return _ICONS[_ICON_GROUPS[kind]][frame_index % 2]
 
 
 def draw_weather_icon(frame: Frame, weather_code: int, *, frame_index: int) -> None:
-    icon = weather_icon(classify_weather_code(weather_code), frame_index=frame_index)
+    symbol = classify_weather_code(weather_code)
+    icon = weather_icon(symbol.kind, frame_index=frame_index)
     for y, row in enumerate(icon):
         for x, pixel in enumerate(row):
             if pixel in ICON_INTENSITIES:

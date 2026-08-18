@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from .http_json import JsonHttpClient
 from .location import Coordinates
+from .weather_codes import SUPPORTED_WEATHER_CODES
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +26,8 @@ class WeatherReading:
             raise ValueError("weather temperature is outside the supported range")
         if isinstance(self.weather_code, bool) or not isinstance(self.weather_code, int):
             raise TypeError("weather code must be an integer")
-        if not 0 <= self.weather_code <= 99:
-            raise ValueError("weather code must be between 0 and 99")
+        if self.weather_code not in SUPPORTED_WEATHER_CODES:
+            raise ValueError(f"unsupported weather code: {self.weather_code}")
         if not isinstance(self.is_day, bool):
             raise TypeError("is_day must be true or false")
 

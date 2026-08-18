@@ -28,11 +28,14 @@ from framework_led_dashboard.weather import (
     WeatherProvider,
     WeatherReading,
 )
-from framework_led_dashboard.weather_icons import (
+from framework_led_dashboard.weather_codes import (
+    SUPPORTED_WEATHER_CODES,
+    WeatherIntensity,
     WeatherKind,
+    WeatherSymbol,
     classify_weather_code,
-    weather_icon,
 )
+from framework_led_dashboard.weather_icons import weather_icon
 
 
 def test_vpn_detector_reports_active_for_networkmanager_vpn() -> None:
@@ -277,6 +280,7 @@ def test_open_meteo_client_requests_current_temperature_weather_code_and_dayligh
         {"current": []},
         {"current": {"temperature_2m": True, "weather_code": 0, "is_day": 1}},
         {"current": {"temperature_2m": 18, "weather_code": True, "is_day": 1}},
+        {"current": {"temperature_2m": 18, "weather_code": 4, "is_day": 1}},
         {"current": {"temperature_2m": 18, "weather_code": 100, "is_day": 1}},
         {"current": {"temperature_2m": float("nan"), "weather_code": 0, "is_day": 1}},
         {"current": {"temperature_2m": 18, "weather_code": 0}},
@@ -313,25 +317,56 @@ def test_weather_provider_contains_fetch_timeout() -> None:
     assert provider.refresh(Coordinates(50.0755, 14.4378, LocationSource.TIMEZONE)) is None
 
 
-@pytest.mark.parametrize(
-    ("weather_code", "kind"),
-    [
-        (0, WeatherKind.CLEAR),
-        (2, WeatherKind.CLOUD),
-        (45, WeatherKind.CLOUD),
-        (61, WeatherKind.RAIN),
-        (82, WeatherKind.RAIN),
-        (71, WeatherKind.SNOW),
-        (86, WeatherKind.SNOW),
-        (95, WeatherKind.THUNDER),
-        (99, WeatherKind.THUNDER),
-    ],
-)
-def test_wmo_weather_codes_map_to_display_groups(
+WMO_SYMBOLS = {
+    0: WeatherSymbol(WeatherKind.CLEAR),
+    1: WeatherSymbol(WeatherKind.MAINLY_CLEAR),
+    2: WeatherSymbol(WeatherKind.PARTLY_CLOUDY),
+    3: WeatherSymbol(WeatherKind.OVERCAST),
+    45: WeatherSymbol(WeatherKind.FOG),
+    48: WeatherSymbol(WeatherKind.RIME_FOG),
+    51: WeatherSymbol(WeatherKind.DRIZZLE, WeatherIntensity.LIGHT),
+    53: WeatherSymbol(WeatherKind.DRIZZLE, WeatherIntensity.MODERATE),
+    55: WeatherSymbol(WeatherKind.DRIZZLE, WeatherIntensity.HEAVY),
+    56: WeatherSymbol(WeatherKind.FREEZING_DRIZZLE, WeatherIntensity.LIGHT),
+    57: WeatherSymbol(WeatherKind.FREEZING_DRIZZLE, WeatherIntensity.HEAVY),
+    61: WeatherSymbol(WeatherKind.RAIN, WeatherIntensity.LIGHT),
+    63: WeatherSymbol(WeatherKind.RAIN, WeatherIntensity.MODERATE),
+    65: WeatherSymbol(WeatherKind.RAIN, WeatherIntensity.HEAVY),
+    66: WeatherSymbol(WeatherKind.FREEZING_RAIN, WeatherIntensity.LIGHT),
+    67: WeatherSymbol(WeatherKind.FREEZING_RAIN, WeatherIntensity.HEAVY),
+    71: WeatherSymbol(WeatherKind.SNOW, WeatherIntensity.LIGHT),
+    73: WeatherSymbol(WeatherKind.SNOW, WeatherIntensity.MODERATE),
+    75: WeatherSymbol(WeatherKind.SNOW, WeatherIntensity.HEAVY),
+    77: WeatherSymbol(WeatherKind.SNOW_GRAINS),
+    80: WeatherSymbol(WeatherKind.RAIN_SHOWERS, WeatherIntensity.LIGHT),
+    81: WeatherSymbol(WeatherKind.RAIN_SHOWERS, WeatherIntensity.MODERATE),
+    82: WeatherSymbol(WeatherKind.RAIN_SHOWERS, WeatherIntensity.HEAVY),
+    85: WeatherSymbol(WeatherKind.SNOW_SHOWERS, WeatherIntensity.LIGHT),
+    86: WeatherSymbol(WeatherKind.SNOW_SHOWERS, WeatherIntensity.HEAVY),
+    95: WeatherSymbol(WeatherKind.THUNDER),
+    96: WeatherSymbol(WeatherKind.THUNDER_HAIL, WeatherIntensity.LIGHT),
+    99: WeatherSymbol(WeatherKind.THUNDER_HAIL, WeatherIntensity.HEAVY),
+}
+
+
+@pytest.mark.parametrize(("weather_code", "symbol"), WMO_SYMBOLS.items())
+def test_every_documented_wmo_code_maps_to_exact_display_symbol(
     weather_code: int,
-    kind: WeatherKind,
+    symbol: WeatherSymbol,
 ) -> None:
-    assert classify_weather_code(weather_code) is kind
+    assert classify_weather_code(weather_code) == symbol
+
+
+def test_supported_weather_codes_exactly_match_open_meteo_documentation() -> None:
+    assert SUPPORTED_WEATHER_CODES == frozenset(WMO_SYMBOLS)
+
+
+@pytest.mark.parametrize("weather_code", [-1, 4, 44, 49, 50, 58, 100])
+def test_undocumented_wmo_codes_are_rejected(weather_code: int) -> None:
+    with pytest.raises(ValueError, match="unsupported weather code"):
+        classify_weather_code(weather_code)
+    with pytest.raises(ValueError, match="unsupported weather code"):
+        WeatherReading(18.0, weather_code, True)
 
 
 @pytest.mark.parametrize("kind", list(WeatherKind))
