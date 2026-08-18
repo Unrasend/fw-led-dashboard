@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from framework_led_dashboard.alerts import AlertState
 from framework_led_dashboard.battery import BatteryMode, BatteryPower
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
 from framework_led_dashboard.left_panel import render_left_panel
@@ -85,6 +86,26 @@ def _render_right_weather_example(
     ).snapshot()
 
 
+def _render_left_battery_alert_off() -> FramePixels:
+    life = tuple(tuple(pixel == "1" for pixel in row) for row in LEFT_LIFE_INPUT)
+    return render_left_panel(
+        life,
+        SystemMetrics(battery_percent=72, cpu_percent=38, ram_used_percent=61),
+        alerts=AlertState(battery=True),
+        blink_on=False,
+    ).snapshot()
+
+
+def _render_right_cpu_alert_off() -> FramePixels:
+    return render_right_panel(
+        weather=WeatherReading(temperature_c=18.4, weather_code=0, is_day=True),
+        cpu_temperature_c=120,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
+        alerts=AlertState(cpu_temperature=True),
+        blink_on=False,
+    ).snapshot()
+
+
 def _expected_usb_commands(frame: FramePixels) -> tuple[bytes, ...]:
     stage_commands = tuple(
         bytes([0x32, 0xAC, 0x07, x, *[frame[y][x] for y in range(FRAME_HEIGHT)]])
@@ -132,6 +153,17 @@ def test_right_panel_weather_animation_matches_all_306_mockup_pixels() -> None:
         assert actual == expected
 
 
+def test_alert_blink_off_frames_match_all_306_mockup_pixels() -> None:
+    cases = (
+        (_render_left_battery_alert_off(), _load_golden("left_alert_battery_off.txt")),
+        (_render_right_cpu_alert_off(), _load_golden("right_alert_cpu_off.txt")),
+    )
+
+    for actual, expected in cases:
+        assert sum(len(row) for row in expected) == 306
+        assert actual == expected
+
+
 def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
     cases = (
         ("left", _render_left_mockup_example(), _load_golden("left_dashboard.txt")),
@@ -164,6 +196,16 @@ def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
             "right-thunder-hail-night",
             _render_right_weather_example(1, weather_code=99, is_day=False),
             _load_golden("right_weather_thunder_hail_night_1.txt"),
+        ),
+        (
+            "left-battery-alert-off",
+            _render_left_battery_alert_off(),
+            _load_golden("left_alert_battery_off.txt"),
+        ),
+        (
+            "right-cpu-alert-off",
+            _render_right_cpu_alert_off(),
+            _load_golden("right_alert_cpu_off.txt"),
         ),
     )
 
