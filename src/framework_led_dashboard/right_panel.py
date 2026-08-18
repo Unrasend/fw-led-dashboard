@@ -31,7 +31,12 @@ def render_right_panel(
             intensity=UNKNOWN_INTENSITY,
         )
     else:
-        draw_weather_icon(frame, weather.weather_code, frame_index=weather_frame)
+        draw_weather_icon(
+            frame,
+            weather.weather_code,
+            is_day=weather.is_day,
+            frame_index=weather_frame,
+        )
         _draw_outside_temperature(frame, weather.temperature_c)
 
     cpu_temperature_is_known = cpu_temperature_c is not None and math.isfinite(

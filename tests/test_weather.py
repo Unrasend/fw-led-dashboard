@@ -369,18 +369,71 @@ def test_undocumented_wmo_codes_are_rejected(weather_code: int) -> None:
         WeatherReading(18.0, weather_code, True)
 
 
-@pytest.mark.parametrize("kind", list(WeatherKind))
-def test_every_weather_icon_has_two_deterministic_nine_by_eight_frames(
-    kind: WeatherKind,
+DISPLAY_SYMBOLS = tuple(dict.fromkeys(WMO_SYMBOLS.values()))
+
+
+@pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_every_weather_symbol_has_two_deterministic_nine_by_eight_frames(
+    symbol: WeatherSymbol,
+    is_day: bool,
 ) -> None:
-    first = weather_icon(kind, frame_index=0)
-    second = weather_icon(kind, frame_index=1)
+    first = weather_icon(symbol, is_day=is_day, frame_index=0)
+    second = weather_icon(symbol, is_day=is_day, frame_index=1)
 
     assert len(first) == len(second) == 8
     assert all(len(row) == 9 for row in first + second)
     assert set("".join(first + second)) <= {".", "L", "#"}
     assert first != second
-    assert weather_icon(kind, frame_index=2) == first
+    assert weather_icon(symbol, is_day=is_day, frame_index=2) == first
+
+
+@pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
+def test_every_weather_symbol_has_distinct_day_and_night_art(symbol: WeatherSymbol) -> None:
+    assert weather_icon(symbol, is_day=True, frame_index=0) != weather_icon(
+        symbol,
+        is_day=False,
+        frame_index=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("light_code", "heavy_code"),
+    [(51, 55), (56, 57), (61, 65), (66, 67), (71, 75), (80, 82), (85, 86), (96, 99)],
+)
+def test_light_and_heavy_weather_have_different_particle_density(
+    light_code: int,
+    heavy_code: int,
+) -> None:
+    light = weather_icon(classify_weather_code(light_code), is_day=True, frame_index=0)
+    heavy = weather_icon(classify_weather_code(heavy_code), is_day=True, frame_index=0)
+
+    assert light != heavy
+
+
+@pytest.mark.parametrize("weather_code", sorted(SUPPORTED_WEATHER_CODES))
+def test_right_panel_renders_every_documented_weather_code(weather_code: int) -> None:
+    frame = render_right_panel(
+        weather=WeatherReading(18.4, weather_code, False),
+        weather_frame=1,
+        cpu_temperature_c=54,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
+    ).snapshot()
+
+    assert any(pixel for row in frame[0:8] for pixel in row)
+
+
+def test_right_panel_uses_daylight_state_for_weather_art() -> None:
+    common = {
+        "weather_frame": 0,
+        "cpu_temperature_c": 54,
+        "battery_power": BatteryPower(BatteryMode.DISCHARGING, 12.4),
+    }
+
+    day = render_right_panel(weather=WeatherReading(18.4, 2, True), **common).snapshot()
+    night = render_right_panel(weather=WeatherReading(18.4, 2, False), **common).snapshot()
+
+    assert day[0:8] != night[0:8]
 
 
 def test_right_panel_renders_weather_icon_and_outside_temperature_in_assigned_rows() -> None:
