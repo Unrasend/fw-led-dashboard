@@ -7,13 +7,13 @@ from typing import Protocol, TypeVar
 from .device_discovery import DeviceDiscoveryError
 from .frame import FRAME_HEIGHT, FRAME_WIDTH
 
-
 _FRAMEWORK_MAGIC = bytes([0x32, 0xAC])
 _STAGE_GREYSCALE_COLUMN = 0x07
 _DRAW_GREYSCALE_BUFFER = 0x08
 _BAUD_RATE = 115_200
 _SERIAL_READ_TIMEOUT_SECONDS = 0.1
 _SERIAL_WRITE_TIMEOUT_SECONDS = 2.0
+_INTER_COMMAND_DELAY_SECONDS = 0.012
 
 
 class TransportError(RuntimeError):
@@ -39,6 +39,7 @@ class SerialConnection(Protocol):
 PathResolver = Callable[[str], str]
 SerialFactory = Callable[[str], SerialConnection]
 Clock = Callable[[], float]
+Sleeper = Callable[[float], None]
 Result = TypeVar("Result")
 
 
@@ -74,6 +75,7 @@ class MatrixTransport:
         path_resolver: PathResolver,
         serial_factory: SerialFactory | None = None,
         clock: Clock = time.monotonic,
+        sleeper: Sleeper = time.sleep,
         reconnect_initial_seconds: float = 0.25,
         reconnect_max_seconds: float = 5.0,
     ) -> None:
@@ -86,6 +88,7 @@ class MatrixTransport:
         self._path_resolver = path_resolver
         self._serial_factory = serial_factory or _open_serial
         self._clock = clock
+        self._sleeper = sleeper
         self._reconnect_initial_seconds = reconnect_initial_seconds
         self._reconnect_max_seconds = reconnect_max_seconds
         self._connection: SerialConnection | None = None
@@ -100,8 +103,10 @@ class MatrixTransport:
         commands = encode_grayscale_frame(frame)
 
         def write_commands(connection: SerialConnection) -> None:
-            for command in commands:
+            for index, command in enumerate(commands):
                 _write_exact(connection, command)
+                if index < len(commands) - 1:
+                    self._sleeper(_INTER_COMMAND_DELAY_SECONDS)
 
         self._execute(write_commands)
 

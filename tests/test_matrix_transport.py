@@ -20,6 +20,9 @@ class FakeClock:
     def __call__(self) -> float:
         return self.now
 
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
 
 class FakeSerial:
     def __init__(
@@ -48,6 +51,24 @@ class FakeSerial:
 
     def close(self) -> None:
         self.closed = True
+
+
+class RateLimitedSerial(FakeSerial):
+    def __init__(self, clock: FakeClock, *, minimum_write_interval: float) -> None:
+        super().__init__()
+        self._clock = clock
+        self._minimum_write_interval = minimum_write_interval
+        self._last_write_at: float | None = None
+
+    def write(self, data: bytes) -> int:
+        if (
+            self._last_write_at is not None
+            and self._clock.now - self._last_write_at < self._minimum_write_interval
+        ):
+            raise OSError("firmware receive buffer overflow")
+        written = super().write(data)
+        self._last_write_at = self._clock.now
+        return written
 
 
 def test_grayscale_frame_matches_official_stage_and_commit_protocol() -> None:
@@ -103,6 +124,23 @@ def test_transport_keeps_one_serial_connection_for_multiple_frames() -> None:
 
     transport.close()
     assert serial_connection.closed is True
+
+
+def test_transport_paces_frame_commands_for_rate_limited_firmware() -> None:
+    clock = FakeClock()
+    serial_connection = RateLimitedSerial(clock, minimum_write_interval=0.01)
+    transport = MatrixTransport(
+        identity="stable-left",
+        path_resolver=lambda identity: f"/dev/by-id/{identity}",
+        serial_factory=lambda path: serial_connection,
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+
+    transport.write_frame([[0] * 9 for _ in range(34)])
+
+    assert len(serial_connection.writes) == 10
+    assert clock.now == pytest.approx(0.108)
 
 
 def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
