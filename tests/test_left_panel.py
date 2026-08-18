@@ -5,6 +5,7 @@ from random import Random
 
 import pytest
 
+from framework_led_dashboard.alerts import AlertState
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
 from framework_led_dashboard.left_panel import render_left_panel
 from framework_led_dashboard.life import (
@@ -14,8 +15,7 @@ from framework_led_dashboard.life import (
     evolve,
     random_life_grid,
 )
-from framework_led_dashboard.system_metrics import SystemMetrics
-from framework_led_dashboard.system_metrics import SystemMetricsProvider
+from framework_led_dashboard.system_metrics import SystemMetrics, SystemMetricsProvider
 
 
 def _life_grid(*live_cells: tuple[int, int]) -> tuple[tuple[bool, ...], ...]:
@@ -225,4 +225,44 @@ def test_left_panel_marks_missing_bars_with_dim_bottom_pixels() -> None:
         frame[y][column] == 0
         for y in range(13, 33)
         for column in (0, 1, 3, 4, 6, 7)
+    )
+
+
+@pytest.mark.parametrize(
+    ("alerts", "hidden_columns"),
+    [
+        (AlertState(battery=True), (0, 1)),
+        (AlertState(cpu_usage=True), (3, 4)),
+        (AlertState(ram=True), (6, 7)),
+    ],
+)
+def test_left_panel_blinks_only_the_critical_bar(
+    alerts: AlertState,
+    hidden_columns: tuple[int, int],
+) -> None:
+    metrics = SystemMetrics(battery_percent=100, cpu_percent=100, ram_used_percent=100)
+    visible = render_left_panel(
+        _life_grid((4, 4)),
+        metrics,
+        alerts=alerts,
+        blink_on=True,
+    ).snapshot()
+    hidden = render_left_panel(
+        _life_grid((4, 4)),
+        metrics,
+        alerts=alerts,
+        blink_on=False,
+    ).snapshot()
+
+    assert hidden[:13] == visible[:13]
+    assert all(
+        hidden[y][column] == 0
+        for y in range(13, 34)
+        for column in hidden_columns
+    )
+    other_columns = {0, 1, 3, 4, 6, 7} - set(hidden_columns)
+    assert all(
+        hidden[y][column] == visible[y][column]
+        for y in range(13, 34)
+        for column in other_columns
     )

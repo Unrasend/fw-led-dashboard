@@ -4,11 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from framework_led_dashboard.alerts import AlertState
 from framework_led_dashboard.battery import BatteryMode, BatteryPower, BatteryPowerProvider
 from framework_led_dashboard.frame import Frame
 from framework_led_dashboard.pixel_font import draw_text
 from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.thermal import CpuTemperatureProvider
+from framework_led_dashboard.weather import WeatherReading
 
 
 def test_pixel_font_draws_three_compact_glyphs_across_nine_columns() -> None:
@@ -258,3 +260,29 @@ def test_right_panel_keeps_local_widgets_inside_assigned_rows() -> None:
 
     lit_rows = {y for y, row in enumerate(frame) if any(row)}
     assert lit_rows <= set(range(9, 14)) | set(range(18, 23)) | set(range(27, 32))
+
+
+@pytest.mark.parametrize(
+    ("alerts", "hidden_rows"),
+    [
+        (AlertState(outside_temperature=True), range(9, 14)),
+        (AlertState(cpu_temperature=True), range(18, 23)),
+        (AlertState(discharge_power=True), range(27, 32)),
+    ],
+)
+def test_right_panel_blinks_only_the_critical_value(
+    alerts: AlertState,
+    hidden_rows: range,
+) -> None:
+    arguments = {
+        "weather": WeatherReading(18.4, 2, True),
+        "cpu_temperature_c": 120,
+        "battery_power": BatteryPower(BatteryMode.DISCHARGING, 36),
+        "alerts": alerts,
+    }
+    visible = render_right_panel(**arguments, blink_on=True).snapshot()
+    hidden = render_right_panel(**arguments, blink_on=False).snapshot()
+
+    assert all(pixel == 0 for y in hidden_rows for pixel in hidden[y])
+    other_rows = set(range(34)) - set(hidden_rows)
+    assert all(hidden[y] == visible[y] for y in other_rows)

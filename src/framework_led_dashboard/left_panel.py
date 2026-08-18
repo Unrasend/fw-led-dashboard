@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+from .alerts import AlertState
 from .frame import Frame
 from .life import LIFE_HEIGHT, LIFE_WIDTH, LifeGrid
 from .system_metrics import SystemMetrics
-
 
 LIFE_INTENSITY = 128
 BAR_INTENSITY = 220
@@ -16,12 +16,22 @@ CPU_COLUMNS = (3, 4)
 RAM_COLUMNS = (6, 7)
 
 
-def render_left_panel(life_state: LifeGrid, metrics: SystemMetrics) -> Frame:
+def render_left_panel(
+    life_state: LifeGrid,
+    metrics: SystemMetrics,
+    *,
+    alerts: AlertState | None = None,
+    blink_on: bool = True,
+) -> Frame:
+    alerts = alerts or AlertState()
     frame = Frame()
     _draw_life(frame, life_state)
-    _draw_bar(frame, BATTERY_COLUMNS, metrics.battery_percent)
-    _draw_bar(frame, CPU_COLUMNS, metrics.cpu_percent)
-    _draw_bar(frame, RAM_COLUMNS, metrics.ram_used_percent)
+    if blink_on or not alerts.battery:
+        _draw_bar(frame, BATTERY_COLUMNS, metrics.battery_percent)
+    if blink_on or not alerts.cpu_usage:
+        _draw_bar(frame, CPU_COLUMNS, metrics.cpu_percent)
+    if blink_on or not alerts.ram:
+        _draw_bar(frame, RAM_COLUMNS, metrics.ram_used_percent)
     return frame
 
 

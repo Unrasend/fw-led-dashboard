@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+from .alerts import AlertState
 from .battery import BatteryMode, BatteryPower
 from .frame import FRAME_WIDTH, Frame
 from .pixel_font import draw_text, text_width
@@ -21,15 +22,19 @@ def render_right_panel(
     battery_power: BatteryPower,
     weather: WeatherReading | None = None,
     weather_frame: int = 0,
+    alerts: AlertState | None = None,
+    blink_on: bool = True,
 ) -> Frame:
+    alerts = alerts or AlertState()
     frame = Frame()
     if weather is None:
-        _draw_centered(
-            frame,
-            "--",
-            y=OUTSIDE_TEMPERATURE_TOP,
-            intensity=UNKNOWN_INTENSITY,
-        )
+        if blink_on or not alerts.outside_temperature:
+            _draw_centered(
+                frame,
+                "--",
+                y=OUTSIDE_TEMPERATURE_TOP,
+                intensity=UNKNOWN_INTENSITY,
+            )
     else:
         draw_weather_icon(
             frame,
@@ -37,27 +42,30 @@ def render_right_panel(
             is_day=weather.is_day,
             frame_index=weather_frame,
         )
-        _draw_outside_temperature(frame, weather.temperature_c)
+        if blink_on or not alerts.outside_temperature:
+            _draw_outside_temperature(frame, weather.temperature_c)
 
     cpu_temperature_is_known = cpu_temperature_c is not None and math.isfinite(
         cpu_temperature_c
     )
     cpu_text = _format_cpu_temperature(cpu_temperature_c)
-    _draw_centered(
-        frame,
-        cpu_text,
-        y=CPU_TEMPERATURE_TOP,
-        intensity=VALUE_INTENSITY if cpu_temperature_is_known else UNKNOWN_INTENSITY,
-    )
+    if blink_on or not alerts.cpu_temperature:
+        _draw_centered(
+            frame,
+            cpu_text,
+            y=CPU_TEMPERATURE_TOP,
+            intensity=VALUE_INTENSITY if cpu_temperature_is_known else UNKNOWN_INTENSITY,
+        )
 
     power_text = _format_power(battery_power)
     power_is_unknown = power_text == "--"
-    _draw_centered(
-        frame,
-        power_text,
-        y=POWER_TOP,
-        intensity=UNKNOWN_INTENSITY if power_is_unknown else VALUE_INTENSITY,
-    )
+    if blink_on or not alerts.discharge_power:
+        _draw_centered(
+            frame,
+            power_text,
+            y=POWER_TOP,
+            intensity=UNKNOWN_INTENSITY if power_is_unknown else VALUE_INTENSITY,
+        )
     return frame
 
 
