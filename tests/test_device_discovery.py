@@ -7,6 +7,7 @@ import pytest
 from framework_led_dashboard.config import PanelConfig, PanelsConfig
 from framework_led_dashboard.device_discovery import (
     DeviceDiscoveryError,
+    MatrixDevice,
     discover_matrix_devices,
     map_panel_devices,
     resolve_device_path,
@@ -116,3 +117,49 @@ def test_resolver_rejects_missing_and_ambiguous_identity() -> None:
     ]
     with pytest.raises(DeviceDiscoveryError, match="ambiguous"):
         resolve_device_path("duplicate", lambda: duplicate_ports)
+
+
+def test_list_panels_cli_prints_calibration_identity_and_location(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+
+    from framework_led_dashboard.__main__ import main
+
+    devices = (
+        MatrixDevice(
+            path="/dev/ttyACM0",
+            serial_number="serial-left",
+            location="1-1",
+            product="LED Matrix Input Module",
+        ),
+        MatrixDevice(
+            path="/dev/ttyACM1",
+            serial_number=None,
+            location="1-2",
+            product="LED Matrix Input Module",
+        ),
+    )
+
+    exit_code = main(["--list-panels"], panel_lister=lambda: devices)
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output == {
+        "panels": [
+            {
+                "identity": "serial-left",
+                "location": "1-1",
+                "path": "/dev/ttyACM0",
+                "product": "LED Matrix Input Module",
+                "serial_number": "serial-left",
+            },
+            {
+                "identity": "1-2",
+                "location": "1-2",
+                "path": "/dev/ttyACM1",
+                "product": "LED Matrix Input Module",
+                "serial_number": None,
+            },
+        ]
+    }
