@@ -67,9 +67,18 @@ def _render_right_mockup_example() -> FramePixels:
     ).snapshot()
 
 
-def _render_right_weather_example(frame_index: int) -> FramePixels:
+def _render_right_weather_example(
+    frame_index: int,
+    *,
+    weather_code: int = 0,
+    is_day: bool = True,
+) -> FramePixels:
     return render_right_panel(
-        weather=WeatherReading(temperature_c=18.4, weather_code=0, is_day=True),
+        weather=WeatherReading(
+            temperature_c=18.4,
+            weather_code=weather_code,
+            is_day=is_day,
+        ),
         weather_frame=frame_index,
         cpu_temperature_c=54,
         battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
@@ -104,6 +113,18 @@ def test_right_panel_weather_animation_matches_all_306_mockup_pixels() -> None:
     cases = (
         (_render_right_weather_example(0), _load_golden("right_weather_clear_0.txt")),
         (_render_right_weather_example(1), _load_golden("right_weather_clear_1.txt")),
+        (
+            _render_right_weather_example(0, weather_code=2, is_day=False),
+            _load_golden("right_weather_partly_cloudy_night_0.txt"),
+        ),
+        (
+            _render_right_weather_example(0, weather_code=65),
+            _load_golden("right_weather_heavy_rain_day_0.txt"),
+        ),
+        (
+            _render_right_weather_example(1, weather_code=99, is_day=False),
+            _load_golden("right_weather_thunder_hail_night_1.txt"),
+        ),
     )
 
     for actual, expected in cases:
@@ -128,6 +149,21 @@ def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
             "right-clear-1",
             _render_right_weather_example(1),
             _load_golden("right_weather_clear_1.txt"),
+        ),
+        (
+            "right-partly-cloudy-night",
+            _render_right_weather_example(0, weather_code=2, is_day=False),
+            _load_golden("right_weather_partly_cloudy_night_0.txt"),
+        ),
+        (
+            "right-heavy-rain-day",
+            _render_right_weather_example(0, weather_code=65),
+            _load_golden("right_weather_heavy_rain_day_0.txt"),
+        ),
+        (
+            "right-thunder-hail-night",
+            _render_right_weather_example(1, weather_code=99, is_day=False),
+            _load_golden("right_weather_thunder_hail_night_1.txt"),
         ),
     )
 

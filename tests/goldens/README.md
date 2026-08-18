@@ -15,3 +15,6 @@ performing one visual hardware check.
 `right_local_metrics.txt` covers local widgets plus the dim unknown-weather state.
 `right_weather_clear_0.txt` and `right_weather_clear_1.txt` independently lock the two
 approved clear-weather animation phases and the complete right-panel layout.
+`right_weather_partly_cloudy_night_0.txt`, `right_weather_heavy_rain_day_0.txt`, and
+`right_weather_thunder_hail_night_1.txt` cover the night palette, heavy precipitation,
+and the most severe documented WMO state without deriving expectations from renderer output.
