@@ -20,6 +20,12 @@ from framework_led_dashboard.location import (
     VpnState,
     timezone_city,
 )
+from framework_led_dashboard.weather import (
+    CachedWeather,
+    OpenMeteoWeatherClient,
+    WeatherProvider,
+    WeatherReading,
+)
 
 
 def test_vpn_detector_reports_active_for_networkmanager_vpn() -> None:
@@ -228,6 +234,72 @@ def test_json_http_client_enforces_https_host_timeout_and_body_limit() -> None:
     )
     with pytest.raises(ValueError, match="too large"):
         oversized.get("https://ipwho.is/")
+
+
+def test_open_meteo_client_requests_only_current_temperature_and_weather_code() -> None:
+    requested_urls: list[str] = []
+
+    def fetch_json(url: str) -> object:
+        requested_urls.append(url)
+        return {"current": {"temperature_2m": 18.4, "weather_code": 61}}
+
+    location = Coordinates(50.0755, 14.4378, LocationSource.IP)
+
+    assert OpenMeteoWeatherClient(fetch_json=fetch_json).fetch(location) == WeatherReading(
+        temperature_c=18.4,
+        weather_code=61,
+    )
+    parsed = urlsplit(requested_urls[0])
+    assert (parsed.scheme, parsed.hostname, parsed.path) == (
+        "https",
+        "api.open-meteo.com",
+        "/v1/forecast",
+    )
+    assert parse_qs(parsed.query) == {
+        "latitude": ["50.0755"],
+        "longitude": ["14.4378"],
+        "current": ["temperature_2m,weather_code"],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"current": []},
+        {"current": {"temperature_2m": True, "weather_code": 0}},
+        {"current": {"temperature_2m": 18, "weather_code": True}},
+        {"current": {"temperature_2m": 18, "weather_code": 100}},
+        {"current": {"temperature_2m": float("nan"), "weather_code": 0}},
+    ],
+)
+def test_open_meteo_client_rejects_malformed_responses(payload: object) -> None:
+    location = Coordinates(50.0755, 14.4378, LocationSource.CACHE)
+
+    assert OpenMeteoWeatherClient(fetch_json=lambda _url: payload).fetch(location) is None
+
+
+def test_weather_provider_returns_last_good_reading_during_outage() -> None:
+    responses: list[WeatherReading | None] = [WeatherReading(18.4, 61), None]
+    times = iter((1000.0, 2000.0))
+    provider = WeatherProvider(fetch_weather=lambda _location: responses.pop(0), clock=times.__next__)
+    location = Coordinates(50.0755, 14.4378, LocationSource.IP)
+
+    first = provider.refresh(location)
+    second = provider.refresh(location)
+
+    assert first == CachedWeather(WeatherReading(18.4, 61), saved_at=1000.0)
+    assert second is first
+    assert provider.current() is first
+
+
+def test_weather_provider_contains_fetch_timeout() -> None:
+    def timeout(_location: Coordinates) -> WeatherReading | None:
+        raise TimeoutError("Open-Meteo timed out")
+
+    provider = WeatherProvider(fetch_weather=timeout)
+
+    assert provider.refresh(Coordinates(50.0755, 14.4378, LocationSource.TIMEZONE)) is None
 
 
 def _probe_name(command: tuple[str, ...]) -> str:
