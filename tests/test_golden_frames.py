@@ -5,6 +5,7 @@ from pathlib import Path
 from framework_led_dashboard.battery import BatteryMode, BatteryPower
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
 from framework_led_dashboard.left_panel import render_left_panel
+from framework_led_dashboard.matrix_transport import MatrixTransport
 from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.system_metrics import SystemMetrics
 
@@ -26,6 +27,22 @@ LEFT_LIFE_INPUT = (
 )
 
 
+class RecordingSerial:
+    def __init__(self) -> None:
+        self.writes: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> int:
+        self.writes.append(data)
+        return len(data)
+
+    def read(self, size: int) -> bytes:
+        return bytes(size)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _load_golden(name: str) -> FramePixels:
     lines = (GOLDEN_DIRECTORY / name).read_text(encoding="utf-8").splitlines()
     assert len(lines) == FRAME_HEIGHT
@@ -34,13 +51,31 @@ def _load_golden(name: str) -> FramePixels:
     return tuple(tuple(PIXEL_VALUES[pixel] for pixel in line) for line in lines)
 
 
-def test_left_panel_matches_all_306_mockup_pixels() -> None:
+def _render_left_mockup_example() -> FramePixels:
     life = tuple(tuple(pixel == "1" for pixel in row) for row in LEFT_LIFE_INPUT)
-
-    actual = render_left_panel(
+    return render_left_panel(
         life,
         SystemMetrics(battery_percent=72, cpu_percent=38, ram_used_percent=61),
     ).snapshot()
+
+
+def _render_right_mockup_example() -> FramePixels:
+    return render_right_panel(
+        cpu_temperature_c=54,
+        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
+    ).snapshot()
+
+
+def _expected_usb_commands(frame: FramePixels) -> tuple[bytes, ...]:
+    stage_commands = tuple(
+        bytes([0x32, 0xAC, 0x07, x, *[frame[y][x] for y in range(FRAME_HEIGHT)]])
+        for x in range(FRAME_WIDTH)
+    )
+    return (*stage_commands, bytes([0x32, 0xAC, 0x08, 0x00]))
+
+
+def test_left_panel_matches_all_306_mockup_pixels() -> None:
+    actual = _render_left_mockup_example()
     expected = _load_golden("left_dashboard.txt")
 
     assert sum(len(row) for row in expected) == 306
@@ -48,11 +83,34 @@ def test_left_panel_matches_all_306_mockup_pixels() -> None:
 
 
 def test_right_panel_local_widgets_match_all_306_mockup_pixels() -> None:
-    actual = render_right_panel(
-        cpu_temperature_c=54,
-        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
-    ).snapshot()
+    actual = _render_right_mockup_example()
     expected = _load_golden("right_local_metrics.txt")
 
     assert sum(len(row) for row in expected) == 306
     assert actual == expected
+
+
+def test_mockup_frames_reach_serial_as_exact_usb_bytes() -> None:
+    cases = (
+        ("left", _render_left_mockup_example(), _load_golden("left_dashboard.txt")),
+        (
+            "right",
+            _render_right_mockup_example(),
+            _load_golden("right_local_metrics.txt"),
+        ),
+    )
+
+    for identity, rendered, golden in cases:
+        serial = RecordingSerial()
+        transport = MatrixTransport(
+            identity=identity,
+            path_resolver=lambda panel_identity: f"/dev/{panel_identity}",
+            serial_factory=lambda path, connection=serial: connection,
+        )
+
+        assert rendered == golden
+        transport.write_frame(rendered)
+
+        assert serial.writes == list(_expected_usb_commands(golden))
+        transport.close()
+        assert serial.closed is True
