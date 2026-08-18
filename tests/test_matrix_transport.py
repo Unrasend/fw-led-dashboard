@@ -128,7 +128,7 @@ def test_transport_keeps_one_serial_connection_for_multiple_frames() -> None:
 
 def test_transport_paces_frame_commands_for_rate_limited_firmware() -> None:
     clock = FakeClock()
-    serial_connection = RateLimitedSerial(clock, minimum_write_interval=0.01)
+    serial_connection = RateLimitedSerial(clock, minimum_write_interval=0.015)
     transport = MatrixTransport(
         identity="stable-left",
         path_resolver=lambda identity: f"/dev/by-id/{identity}",
@@ -140,7 +140,7 @@ def test_transport_paces_frame_commands_for_rate_limited_firmware() -> None:
     transport.write_frame([[0] * 9 for _ in range(34)])
 
     assert len(serial_connection.writes) == 10
-    assert clock.now == pytest.approx(0.108)
+    assert clock.now == pytest.approx(0.18)
 
 
 def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
