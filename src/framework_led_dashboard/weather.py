@@ -14,6 +14,7 @@ from .location import Coordinates
 class WeatherReading:
     temperature_c: float
     weather_code: int
+    is_day: bool
 
     def __post_init__(self) -> None:
         if isinstance(self.temperature_c, bool) or not isinstance(
@@ -26,6 +27,8 @@ class WeatherReading:
             raise TypeError("weather code must be an integer")
         if not 0 <= self.weather_code <= 99:
             raise ValueError("weather code must be between 0 and 99")
+        if not isinstance(self.is_day, bool):
+            raise TypeError("is_day must be true or false")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +54,7 @@ class OpenMeteoWeatherClient:
             {
                 "latitude": location.latitude,
                 "longitude": location.longitude,
-                "current": "temperature_2m,weather_code",
+                "current": "temperature_2m,weather_code,is_day",
             }
         )
         try:
@@ -62,6 +65,7 @@ class OpenMeteoWeatherClient:
             return WeatherReading(
                 temperature_c=_weather_number(current.get("temperature_2m")),
                 weather_code=_weather_code(current.get("weather_code")),
+                is_day=_daylight(current.get("is_day")),
             )
         except (OSError, TypeError, ValueError):
             return None
@@ -101,3 +105,9 @@ def _weather_code(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("weather code must be an integer")
     return value
+
+
+def _daylight(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in {0, 1}:
+        raise TypeError("is_day must be integer 0 or 1")
+    return value == 1

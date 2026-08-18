@@ -243,18 +243,19 @@ def test_json_http_client_enforces_https_host_timeout_and_body_limit() -> None:
         oversized.get("https://ipwho.is/")
 
 
-def test_open_meteo_client_requests_only_current_temperature_and_weather_code() -> None:
+def test_open_meteo_client_requests_current_temperature_weather_code_and_daylight() -> None:
     requested_urls: list[str] = []
 
     def fetch_json(url: str) -> object:
         requested_urls.append(url)
-        return {"current": {"temperature_2m": 18.4, "weather_code": 61}}
+        return {"current": {"temperature_2m": 18.4, "weather_code": 61, "is_day": 0}}
 
     location = Coordinates(50.0755, 14.4378, LocationSource.IP)
 
     assert OpenMeteoWeatherClient(fetch_json=fetch_json).fetch(location) == WeatherReading(
         temperature_c=18.4,
         weather_code=61,
+        is_day=False,
     )
     parsed = urlsplit(requested_urls[0])
     assert (parsed.scheme, parsed.hostname, parsed.path) == (
@@ -265,7 +266,7 @@ def test_open_meteo_client_requests_only_current_temperature_and_weather_code() 
     assert parse_qs(parsed.query) == {
         "latitude": ["50.0755"],
         "longitude": ["14.4378"],
-        "current": ["temperature_2m,weather_code"],
+        "current": ["temperature_2m,weather_code,is_day"],
     }
 
 
@@ -274,10 +275,13 @@ def test_open_meteo_client_requests_only_current_temperature_and_weather_code() 
     [
         {},
         {"current": []},
-        {"current": {"temperature_2m": True, "weather_code": 0}},
-        {"current": {"temperature_2m": 18, "weather_code": True}},
-        {"current": {"temperature_2m": 18, "weather_code": 100}},
-        {"current": {"temperature_2m": float("nan"), "weather_code": 0}},
+        {"current": {"temperature_2m": True, "weather_code": 0, "is_day": 1}},
+        {"current": {"temperature_2m": 18, "weather_code": True, "is_day": 1}},
+        {"current": {"temperature_2m": 18, "weather_code": 100, "is_day": 1}},
+        {"current": {"temperature_2m": float("nan"), "weather_code": 0, "is_day": 1}},
+        {"current": {"temperature_2m": 18, "weather_code": 0}},
+        {"current": {"temperature_2m": 18, "weather_code": 0, "is_day": True}},
+        {"current": {"temperature_2m": 18, "weather_code": 0, "is_day": 2}},
     ],
 )
 def test_open_meteo_client_rejects_malformed_responses(payload: object) -> None:
@@ -287,7 +291,7 @@ def test_open_meteo_client_rejects_malformed_responses(payload: object) -> None:
 
 
 def test_weather_provider_returns_last_good_reading_during_outage() -> None:
-    responses: list[WeatherReading | None] = [WeatherReading(18.4, 61), None]
+    responses: list[WeatherReading | None] = [WeatherReading(18.4, 61, False), None]
     times = iter((1000.0, 2000.0))
     provider = WeatherProvider(fetch_weather=lambda _location: responses.pop(0), clock=times.__next__)
     location = Coordinates(50.0755, 14.4378, LocationSource.IP)
@@ -295,7 +299,7 @@ def test_weather_provider_returns_last_good_reading_during_outage() -> None:
     first = provider.refresh(location)
     second = provider.refresh(location)
 
-    assert first == CachedWeather(WeatherReading(18.4, 61), saved_at=1000.0)
+    assert first == CachedWeather(WeatherReading(18.4, 61, False), saved_at=1000.0)
     assert second is first
     assert provider.current() is first
 
@@ -346,7 +350,7 @@ def test_every_weather_icon_has_two_deterministic_nine_by_eight_frames(
 
 def test_right_panel_renders_weather_icon_and_outside_temperature_in_assigned_rows() -> None:
     frame = render_right_panel(
-        weather=WeatherReading(18.4, 0),
+        weather=WeatherReading(18.4, 0, True),
         weather_frame=0,
         cpu_temperature_c=54,
         battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),

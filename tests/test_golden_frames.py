@@ -69,7 +69,7 @@ def _render_right_mockup_example() -> FramePixels:
 
 def _render_right_weather_example(frame_index: int) -> FramePixels:
     return render_right_panel(
-        weather=WeatherReading(temperature_c=18.4, weather_code=0),
+        weather=WeatherReading(temperature_c=18.4, weather_code=0, is_day=True),
         weather_frame=frame_index,
         cpu_temperature_c=54,
         battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
