@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from random import Random
 
 import pytest
 
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
-from framework_led_dashboard.life import LIFE_HEIGHT, LIFE_WIDTH, LifeAnimation, evolve
+from framework_led_dashboard.left_panel import render_left_panel
+from framework_led_dashboard.life import (
+    LIFE_HEIGHT,
+    LIFE_WIDTH,
+    LifeAnimation,
+    evolve,
+    random_life_grid,
+)
+from framework_led_dashboard.system_metrics import SystemMetrics
 from framework_led_dashboard.system_metrics import SystemMetricsProvider
 
 
@@ -101,6 +110,16 @@ def test_life_reseeds_when_a_short_oscillator_repeats() -> None:
     assert animation.step() == replacement
 
 
+def test_random_life_seed_is_bounded_nonempty_and_reproducible() -> None:
+    first = random_life_grid(Random(7))
+    second = random_life_grid(Random(7))
+
+    assert first == second
+    assert len(first) == 12
+    assert all(len(row) == 9 for row in first)
+    assert any(any(row) for row in first)
+
+
 def test_system_metrics_reads_battery_and_ram_while_cpu_waits_for_second_sample(
     tmp_path: Path,
 ) -> None:
@@ -155,3 +174,55 @@ def test_system_metrics_returns_unknown_for_missing_or_malformed_sources(tmp_pat
     assert metrics.battery_percent is None
     assert metrics.cpu_percent is None
     assert metrics.ram_used_percent is None
+
+
+@pytest.mark.parametrize(
+    ("percent", "first_lit_row"),
+    [(0, None), (50, 23), (100, 13)],
+)
+def test_left_panel_bar_snapshots_fill_from_bottom(
+    percent: float,
+    first_lit_row: int | None,
+) -> None:
+    frame = render_left_panel(
+        _life_grid(),
+        SystemMetrics(
+            battery_percent=percent,
+            cpu_percent=percent,
+            ram_used_percent=percent,
+        ),
+    ).snapshot()
+
+    expected_rows = set() if first_lit_row is None else set(range(first_lit_row, 34))
+    for columns in ((0, 1), (3, 4), (6, 7)):
+        lit_rows = {
+            y
+            for y in range(13, 34)
+            if any(frame[y][column] > 0 for column in columns)
+        }
+        assert lit_rows == expected_rows
+
+
+def test_left_panel_keeps_life_and_bars_inside_assigned_regions() -> None:
+    frame = render_left_panel(
+        _life_grid((8, 11)),
+        SystemMetrics(battery_percent=100, cpu_percent=100, ram_used_percent=100),
+    ).snapshot()
+
+    assert frame[11][8] > 0
+    assert frame[12] == (0,) * 9
+    assert all(frame[y][column] == 0 for y in range(13, 34) for column in (2, 5, 8))
+
+
+def test_left_panel_marks_missing_bars_with_dim_bottom_pixels() -> None:
+    frame = render_left_panel(
+        _life_grid(),
+        SystemMetrics(battery_percent=None, cpu_percent=None, ram_used_percent=None),
+    ).snapshot()
+
+    assert all(frame[33][column] > 0 for column in (0, 1, 3, 4, 6, 7))
+    assert all(
+        frame[y][column] == 0
+        for y in range(13, 33)
+        for column in (0, 1, 3, 4, 6, 7)
+    )

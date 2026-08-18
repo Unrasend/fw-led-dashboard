@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from random import Random
 
 
 LIFE_WIDTH = 9
 LIFE_HEIGHT = 12
 LifeGrid = tuple[tuple[bool, ...], ...]
 SeedFactory = Callable[[], LifeGrid]
+
+
+def random_life_grid(random_source: Random, alive_probability: float = 0.32) -> LifeGrid:
+    if not 0 < alive_probability < 1:
+        raise ValueError("alive_probability must be between 0 and 1")
+
+    rows = [
+        [random_source.random() < alive_probability for _ in range(LIFE_WIDTH)]
+        for _ in range(LIFE_HEIGHT)
+    ]
+    if not any(any(row) for row in rows):
+        rows[LIFE_HEIGHT // 2][LIFE_WIDTH // 2] = True
+    return tuple(tuple(row) for row in rows)
 
 
 def evolve(state: LifeGrid) -> LifeGrid:
