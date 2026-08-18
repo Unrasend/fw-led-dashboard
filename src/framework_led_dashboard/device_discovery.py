@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from .config import PanelsConfig
@@ -33,10 +33,7 @@ class MatrixDevice:
     serial_number: str | None
     location: str | None
     product: str | None
-
-    @property
-    def identity(self) -> str | None:
-        return self.serial_number or self.location
+    identity: str | None
 
     def matches(self, identity: str) -> bool:
         return identity in {self.serial_number, self.location}
@@ -49,15 +46,19 @@ class PanelDevices:
 
 
 def discover_matrix_devices(ports: Iterable[PortInfo]) -> tuple[MatrixDevice, ...]:
-    devices = [
+    detected = [
         MatrixDevice(
             path=port.device,
             serial_number=_normalize(port.serial_number),
             location=_normalize(port.location),
             product=_normalize(port.product),
+            identity=None,
         )
         for port in ports
         if port.vid == FRAMEWORK_VID and port.pid == LED_MATRIX_PID
+    ]
+    devices = [
+        replace(device, identity=_unique_identity(device, detected)) for device in detected
     ]
     return tuple(sorted(devices, key=lambda device: (device.identity or "", device.path)))
 
@@ -117,3 +118,10 @@ def _normalize(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _unique_identity(device: MatrixDevice, devices: Iterable[MatrixDevice]) -> str | None:
+    for candidate in (device.serial_number, device.location):
+        if candidate is not None and sum(other.matches(candidate) for other in devices) == 1:
+            return candidate
+    return None

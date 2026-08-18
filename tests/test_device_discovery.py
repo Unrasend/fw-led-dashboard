@@ -39,6 +39,20 @@ def test_discovery_accepts_only_framework_led_matrix_usb_ports() -> None:
     ]
 
 
+def test_discovery_uses_location_when_framework_panels_share_one_serial_number() -> None:
+    devices = discover_matrix_devices(
+        [
+            FakePort("/dev/ttyACM0", 0x32AC, 0x0020, "shared-serial", "1-3.3:1.0"),
+            FakePort("/dev/ttyACM1", 0x32AC, 0x0020, "shared-serial", "1-4.2:1.0"),
+        ]
+    )
+
+    assert [(device.path, device.identity) for device in devices] == [
+        ("/dev/ttyACM0", "1-3.3:1.0"),
+        ("/dev/ttyACM1", "1-4.2:1.0"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("swap_panels", "expected_left", "expected_right"),
     [(False, "/dev/ttyACM1", "/dev/ttyACM0"), (True, "/dev/ttyACM0", "/dev/ttyACM1")],
@@ -132,12 +146,14 @@ def test_list_panels_cli_prints_calibration_identity_and_location(
             serial_number="serial-left",
             location="1-1",
             product="LED Matrix Input Module",
+            identity="serial-left",
         ),
         MatrixDevice(
             path="/dev/ttyACM1",
             serial_number=None,
             location="1-2",
             product="LED Matrix Input Module",
+            identity="1-2",
         ),
     )
 
