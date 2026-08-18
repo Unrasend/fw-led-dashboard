@@ -1,0 +1,38 @@
+# Framework LED dashboard — safe defaults for two 9x34 LED Matrix modules.
+brightness_percent = 40
+animation_fps = 2
+swap_panels = false
+
+[panels.left]
+# Fill after running the panel calibration command in Task 2.
+identity = ""
+
+[panels.right]
+identity = ""
+
+[location]
+# Explicit coordinates override IP geolocation. Uncomment both or neither.
+# latitude = 50.0755
+# longitude = 14.4378
+ip_lookup_enabled = true
+ip_lookup_ttl_seconds = 21600
+vpn_interface_prefixes = ["tun", "tap", "wg", "tailscale", "nordlynx", "mullvad"]
+
+[updates]
+metrics_seconds = 1
+weather_seconds = 900
+
+[alerts]
+cpu_temperature_critical_c = 120
+cpu_temperature_recovery_c = 115
+battery_critical_percent = 10
+battery_recovery_percent = 12
+ram_available_critical_percent = 5
+ram_available_recovery_percent = 8
+ram_critical_seconds = 10
+
+# Disabled unless measured and explicitly configured.
+# cpu_usage_critical_percent = 95
+# discharge_power_critical_w = 35
+# outside_temperature_min_c = -20
+# outside_temperature_max_c = 38
