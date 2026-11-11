@@ -8,12 +8,20 @@ from .device_discovery import DeviceDiscoveryError
 from .frame import FRAME_HEIGHT, FRAME_WIDTH
 
 _FRAMEWORK_MAGIC = bytes([0x32, 0xAC])
+_BRIGHTNESS = 0x00
+_SLEEP = 0x03
+_ANIMATE = 0x04
 _STAGE_GREYSCALE_COLUMN = 0x07
 _DRAW_GREYSCALE_BUFFER = 0x08
+_RESPONSE_SIZE = 32
+# The firmware fades a waking panel in with `old_brightness - 5` on a u8. A stored level below 5
+# wraps to ~250, so the panel flares to full brightness and then drops back: never go below 5.
+MIN_BRIGHTNESS_LEVEL = 5
 _BAUD_RATE = 115_200
-_SERIAL_READ_TIMEOUT_SECONDS = 0.1
-_SERIAL_WRITE_TIMEOUT_SECONDS = 2.0
-_INTER_COMMAND_DELAY_SECONDS = 0.05
+# A waking panel ignores USB during its fade-in: up to 255 / 5 steps x 100 ms = 5.1 s.
+# Both timeouts cover it, so a wake-up (e.g. after suspend) stalls a frame instead of failing it.
+_SERIAL_READ_TIMEOUT_SECONDS = 6.0
+_SERIAL_WRITE_TIMEOUT_SECONDS = 6.0
 
 
 class TransportError(RuntimeError):
@@ -39,12 +47,12 @@ class SerialConnection(Protocol):
 PathResolver = Callable[[str], str]
 SerialFactory = Callable[[str], SerialConnection]
 Clock = Callable[[], float]
-Sleeper = Callable[[float], None]
+ConnectHook = Callable[[SerialConnection], None]
 Result = TypeVar("Result")
 
 
 def encode_grayscale_frame(frame: Sequence[Sequence[int]]) -> tuple[bytes, ...]:
-    """Encode a row-major 9x34 frame as one atomic Framework matrix update."""
+    """Encode a row-major 9x34 frame as the Framework stage-column and commit commands."""
     if len(frame) != FRAME_HEIGHT:
         raise ValueError(f"grayscale frame must have {FRAME_HEIGHT} rows")
 
@@ -65,6 +73,46 @@ def encode_grayscale_frame(frame: Sequence[Sequence[int]]) -> tuple[bytes, ...]:
     return (*stage_commands, commit_command)
 
 
+def brightness_command(brightness_percent: int) -> bytes:
+    if (
+        isinstance(brightness_percent, bool)
+        or not isinstance(brightness_percent, int)
+        or not 0 <= brightness_percent <= 100
+    ):
+        raise ValueError("brightness_percent must be an integer between 0 and 100")
+    level = max(MIN_BRIGHTNESS_LEVEL, round(255 * brightness_percent / 100))
+    return _FRAMEWORK_MAGIC + bytes([_BRIGHTNESS, level])
+
+
+def sleep_command(sleeping: bool) -> bytes:
+    """Sleep fades the panel out and powers its LED controller down; any later command wakes it."""
+    return _FRAMEWORK_MAGIC + bytes([_SLEEP, 1 if sleeping else 0])
+
+
+def prepare_panel(brightness_percent: Callable[[], int]) -> ConnectHook:
+    """Build the setup run on every new connection: fixed brightness, no firmware animation.
+
+    Any command wakes a sleeping panel, which then ignores USB during its fade-in. The setup
+    therefore wakes it with a GetBrightness query and waits for the answer by reading: a read
+    just waits, while a second write would block in the serial layer and hit its timeout.
+    """
+    query = _FRAMEWORK_MAGIC + bytes([_BRIGHTNESS])
+    animation_off = _FRAMEWORK_MAGIC + bytes([_ANIMATE, 0x00])
+
+    def prepare(connection: SerialConnection) -> None:
+        _write_exact(connection, query)
+        response = connection.read(_RESPONSE_SIZE)
+        if len(response) != _RESPONSE_SIZE:
+            raise OSError(
+                f"panel did not answer the brightness query: got {len(response)} of "
+                f"{_RESPONSE_SIZE} bytes"
+            )
+        _write_exact(connection, brightness_command(brightness_percent()))
+        _write_exact(connection, animation_off)
+
+    return prepare
+
+
 class MatrixTransport:
     """Persistent serial connection that reconnects by stable panel identity."""
 
@@ -75,9 +123,9 @@ class MatrixTransport:
         path_resolver: PathResolver,
         serial_factory: SerialFactory | None = None,
         clock: Clock = time.monotonic,
-        sleeper: Sleeper = time.sleep,
         reconnect_initial_seconds: float = 0.25,
         reconnect_max_seconds: float = 5.0,
+        on_connect: ConnectHook | None = None,
     ) -> None:
         if reconnect_initial_seconds <= 0:
             raise ValueError("reconnect_initial_seconds must be greater than zero")
@@ -88,9 +136,9 @@ class MatrixTransport:
         self._path_resolver = path_resolver
         self._serial_factory = serial_factory or _open_serial
         self._clock = clock
-        self._sleeper = sleeper
         self._reconnect_initial_seconds = reconnect_initial_seconds
         self._reconnect_max_seconds = reconnect_max_seconds
+        self._on_connect = on_connect
         self._connection: SerialConnection | None = None
         self._failure_count = 0
         self._next_attempt_at = 0.0
@@ -99,14 +147,20 @@ class MatrixTransport:
     def is_connected(self) -> bool:
         return self._connection is not None
 
+    def send(self, command: bytes) -> None:
+        self._execute(lambda connection: _write_exact(connection, command))
+
     def write_frame(self, frame: Sequence[Sequence[int]]) -> None:
+        """Send each command as its own write so every command lands in its own USB packet.
+
+        Joined commands share a packet and the firmware silently drops all but the first.
+        The firmware paces the host through USB flow control, so no sleep is needed.
+        """
         commands = encode_grayscale_frame(frame)
 
         def write_commands(connection: SerialConnection) -> None:
-            for index, command in enumerate(commands):
+            for command in commands:
                 _write_exact(connection, command)
-                if index < len(commands) - 1:
-                    self._sleeper(_INTER_COMMAND_DELAY_SECONDS)
 
         self._execute(write_commands)
 
@@ -143,6 +197,8 @@ class MatrixTransport:
     def _connect(self) -> SerialConnection:
         path = self._path_resolver(self._identity)
         self._connection = self._serial_factory(path)
+        if self._on_connect is not None:
+            self._on_connect(self._connection)
         return self._connection
 
     def _ensure_reconnect_ready(self) -> None:

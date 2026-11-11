@@ -1,28 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from random import Random
+from types import SimpleNamespace
 
 import pytest
 
 from framework_led_dashboard.alerts import AlertState
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
 from framework_led_dashboard.left_panel import render_left_panel
-from framework_led_dashboard.life import (
-    LIFE_HEIGHT,
-    LIFE_WIDTH,
-    LifeAnimation,
-    evolve,
-    random_life_grid,
-)
 from framework_led_dashboard.system_metrics import SystemMetrics, SystemMetricsProvider
-
-
-def _life_grid(*live_cells: tuple[int, int]) -> tuple[tuple[bool, ...], ...]:
-    live = set(live_cells)
-    return tuple(
-        tuple((x, y) in live for x in range(LIFE_WIDTH)) for y in range(LIFE_HEIGHT)
-    )
 
 
 def test_frame_is_exactly_nine_by_thirty_four_and_starts_dark() -> None:
@@ -67,57 +53,6 @@ def test_frame_fills_rectangles_without_touching_surrounding_pixels() -> None:
 def test_frame_rejects_out_of_bounds_pixels(x: int, y: int) -> None:
     with pytest.raises(IndexError, match="outside"):
         Frame().set_pixel(x, y, 1)
-
-
-def test_life_wraps_at_its_own_nine_by_twelve_boundaries() -> None:
-    state = _life_grid((8, 11), (8, 0), (0, 11))
-
-    next_state = evolve(state)
-
-    assert LIFE_WIDTH == 9
-    assert LIFE_HEIGHT == 12
-    assert next_state[0][0] is True
-    assert len(next_state) == 12
-    assert all(len(row) == 9 for row in next_state)
-
-
-@pytest.mark.parametrize(
-    "stable_state",
-    [
-        _life_grid(),
-        _life_grid((1, 1), (2, 1), (1, 2), (2, 2)),
-    ],
-)
-def test_life_reseeds_after_death_or_still_state(
-    stable_state: tuple[tuple[bool, ...], ...],
-) -> None:
-    replacement = _life_grid((4, 4), (5, 4), (4, 5))
-    animation = LifeAnimation(initial_state=stable_state, seed_factory=lambda: replacement)
-
-    assert animation.step() == replacement
-
-
-def test_life_reseeds_when_a_short_oscillator_repeats() -> None:
-    horizontal_blinker = _life_grid((3, 4), (4, 4), (5, 4))
-    vertical_blinker = _life_grid((4, 3), (4, 4), (4, 5))
-    replacement = _life_grid((1, 1), (2, 1), (1, 2))
-    animation = LifeAnimation(
-        initial_state=horizontal_blinker,
-        seed_factory=lambda: replacement,
-    )
-
-    assert animation.step() == vertical_blinker
-    assert animation.step() == replacement
-
-
-def test_random_life_seed_is_bounded_nonempty_and_reproducible() -> None:
-    first = random_life_grid(Random(7))
-    second = random_life_grid(Random(7))
-
-    assert first == second
-    assert len(first) == 12
-    assert all(len(row) == 9 for row in first)
-    assert any(any(row) for row in first)
 
 
 def test_system_metrics_reads_battery_and_ram_while_cpu_waits_for_second_sample(
@@ -176,93 +111,203 @@ def test_system_metrics_returns_unknown_for_missing_or_malformed_sources(tmp_pat
     assert metrics.ram_used_percent is None
 
 
+def _gpu_card(root: Path, name: str, busy: str, runtime_status: str = "active") -> None:
+    device = root / name / "device"
+    (device / "power").mkdir(parents=True)
+    (device / "gpu_busy_percent").write_text(busy, encoding="utf-8")
+    (device / "power" / "runtime_status").write_text(f"{runtime_status}\n", encoding="utf-8")
+
+
+def _statvfs(blocks: int, free: int, available: int):
+    return lambda _path: SimpleNamespace(f_blocks=blocks, f_bfree=free, f_bavail=available)
+
+
+def test_system_metrics_reads_gpu_swap_and_disk(tmp_path: Path) -> None:
+    drm = tmp_path / "drm"
+    _gpu_card(drm, "card1", "16\n")
+    _gpu_card(drm, "card2", "40\n")
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal: 1000 kB\nMemAvailable: 250 kB\nSwapTotal: 400 kB\nSwapFree: 100 kB\n",
+        encoding="utf-8",
+    )
+    provider = SystemMetricsProvider(
+        proc_stat_path=tmp_path / "missing-stat",
+        meminfo_path=meminfo,
+        battery_capacity_path=tmp_path / "missing-capacity",
+        drm_root=drm,
+        disk_path=tmp_path,
+        statvfs=_statvfs(blocks=1000, free=300, available=200),
+    )
+
+    metrics = provider.read()
+
+    assert metrics.gpu_percent == 40
+    assert metrics.swap_used_percent == 75
+    # df semantics: used / (used + available to unprivileged users) = 700 / 900.
+    assert metrics.disk_used_percent == pytest.approx(77.78, abs=0.01)
+
+
+def test_system_metrics_does_not_wake_a_runtime_suspended_gpu(tmp_path: Path) -> None:
+    drm = tmp_path / "drm"
+    _gpu_card(drm, "card0", "99\n", runtime_status="suspended")
+    _gpu_card(drm, "card1", "12\n")
+    provider = SystemMetricsProvider(
+        proc_stat_path=tmp_path / "missing-stat",
+        meminfo_path=tmp_path / "missing-meminfo",
+        battery_capacity_path=tmp_path / "missing-capacity",
+        drm_root=drm,
+        statvfs=_statvfs(blocks=0, free=0, available=0),
+    )
+
+    assert provider.read().gpu_percent == 12
+
+
+def test_system_metrics_reports_unknown_gpu_swap_and_disk(tmp_path: Path) -> None:
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal: 1000 kB\nMemAvailable: 250 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+        encoding="utf-8",
+    )
+
+    def failing_statvfs(_path: Path) -> SimpleNamespace:
+        raise OSError("gone")
+
+    provider = SystemMetricsProvider(
+        proc_stat_path=tmp_path / "missing-stat",
+        meminfo_path=meminfo,
+        battery_capacity_path=tmp_path / "missing-capacity",
+        drm_root=tmp_path / "no-drm",
+        statvfs=failing_statvfs,
+    )
+
+    metrics = provider.read()
+
+    assert metrics.gpu_percent is None
+    assert metrics.swap_used_percent is None
+    assert metrics.disk_used_percent is None
+    assert metrics.ram_used_percent == 75
+
+
+def test_left_panel_draws_the_sources_chosen_for_each_bar() -> None:
+    metrics = SystemMetrics(
+        battery_percent=0,
+        cpu_percent=0,
+        ram_used_percent=0,
+        gpu_percent=100,
+        swap_used_percent=50,
+        disk_used_percent=None,
+    )
+
+    chosen = render_left_panel(metrics, bars=("gpu", "swap", "disk")).snapshot()
+    expected = render_left_panel(
+        SystemMetrics(battery_percent=100, cpu_percent=50, ram_used_percent=None)
+    ).snapshot()
+
+    assert chosen == expected
+
+
+def test_left_panel_blinks_the_bar_that_shows_the_critical_source() -> None:
+    metrics = SystemMetrics(
+        battery_percent=100, cpu_percent=100, ram_used_percent=100, gpu_percent=100
+    )
+    alerts = AlertState(battery=True)
+    bars = ("gpu", "cpu", "battery")
+
+    hidden = render_left_panel(metrics, bars=bars, alerts=alerts, blink_on=False)
+    shown = render_left_panel(metrics, bars=bars, alerts=alerts, blink_on=True)
+
+    dark_columns = {
+        x for x in range(FRAME_WIDTH) if all(hidden.snapshot()[y][x] == 0 for y in range(21))
+    }
+    assert {7, 8} <= dark_columns
+    assert {0, 1, 3, 4, 5}.isdisjoint(dark_columns)
+    assert shown.snapshot() != hidden.snapshot()
+
+
+@pytest.mark.parametrize(
+    "bars", [("cpu", "ram"), ("cpu", "ram", "fan"), ("cpu", "ram", "gpu", "disk")]
+)
+def test_left_panel_rejects_invalid_bar_choices(bars: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="bars"):
+        render_left_panel(SystemMetrics(1, 1, 1), bars=bars)
+
+
 @pytest.mark.parametrize(
     ("percent", "first_lit_row"),
-    [(0, None), (50, 23), (100, 13)],
+    [(0, None), (50, 10), (100, 0)],
 )
 def test_left_panel_bar_snapshots_fill_from_bottom(
     percent: float,
     first_lit_row: int | None,
 ) -> None:
     frame = render_left_panel(
-        _life_grid(),
-        SystemMetrics(
-            battery_percent=percent,
-            cpu_percent=percent,
-            ram_used_percent=percent,
-        ),
+        SystemMetrics(battery_percent=percent, cpu_percent=percent, ram_used_percent=percent),
     ).snapshot()
 
-    expected_rows = set() if first_lit_row is None else set(range(first_lit_row, 34))
-    for columns in ((0, 1), (3, 4), (6, 7)):
-        lit_rows = {
-            y
-            for y in range(13, 34)
-            if any(frame[y][column] > 0 for column in columns)
-        }
+    expected_rows = set() if first_lit_row is None else set(range(first_lit_row, 21))
+    for columns in ((0, 1), (3, 4, 5), (7, 8)):
+        lit_rows = {y for y in range(21) if any(frame[y][column] > 0 for column in columns)}
         assert lit_rows == expected_rows
 
 
-def test_left_panel_keeps_life_and_bars_inside_assigned_regions() -> None:
+def test_left_panel_joins_bars_with_a_full_width_base_row() -> None:
     frame = render_left_panel(
-        _life_grid((8, 11)),
+        SystemMetrics(battery_percent=0, cpu_percent=0, ram_used_percent=0),
+    ).snapshot()
+
+    assert frame[21] == (220,) * 9
+    assert frame[22] == (0,) * 9
+    assert all(frame[y] == (0,) * 9 for y in range(21))
+
+
+def test_left_panel_keeps_bars_inside_assigned_columns() -> None:
+    frame = render_left_panel(
         SystemMetrics(battery_percent=100, cpu_percent=100, ram_used_percent=100),
     ).snapshot()
 
-    assert frame[11][8] > 0
-    assert frame[12] == (0,) * 9
-    assert all(frame[y][column] == 0 for y in range(13, 34) for column in (2, 5, 8))
+    assert all(frame[y][column] == 0 for y in range(21) for column in (2, 6))
+    assert all(frame[y][column] == 220 for y in range(21) for column in (0, 1, 3, 4, 5, 7, 8))
 
 
 def test_left_panel_marks_missing_bars_with_dim_bottom_pixels() -> None:
     frame = render_left_panel(
-        _life_grid(),
         SystemMetrics(battery_percent=None, cpu_percent=None, ram_used_percent=None),
     ).snapshot()
 
-    assert all(frame[33][column] > 0 for column in (0, 1, 3, 4, 6, 7))
-    assert all(
-        frame[y][column] == 0
-        for y in range(13, 33)
-        for column in (0, 1, 3, 4, 6, 7)
-    )
+    assert all(frame[20][column] == 24 for column in (0, 1, 3, 4, 5, 7, 8))
+    assert all(frame[y][column] == 0 for y in range(20) for column in (0, 1, 3, 4, 5, 7, 8))
+
+
+def test_left_panel_mirrors_equalizer_in_rows_twenty_three_to_thirty_three() -> None:
+    levels = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2 / 11)
+
+    frame = render_left_panel(SystemMetrics(50, 50, 50), spectrum=levels).snapshot()
+
+    column = lambda x: tuple(frame[y][x] for y in range(23, 34))
+    assert column(8) == (220,) + (128,) * 10
+    assert column(0) == (0,) * 9 + (220, 128)
+    assert all(column(x) == (0,) * 11 for x in range(1, 8))
 
 
 @pytest.mark.parametrize(
     ("alerts", "hidden_columns"),
     [
         (AlertState(battery=True), (0, 1)),
-        (AlertState(cpu_usage=True), (3, 4)),
-        (AlertState(ram=True), (6, 7)),
+        (AlertState(cpu_usage=True), (3, 4, 5)),
+        (AlertState(ram=True), (7, 8)),
     ],
 )
 def test_left_panel_blinks_only_the_critical_bar(
     alerts: AlertState,
-    hidden_columns: tuple[int, int],
+    hidden_columns: tuple[int, ...],
 ) -> None:
     metrics = SystemMetrics(battery_percent=100, cpu_percent=100, ram_used_percent=100)
-    visible = render_left_panel(
-        _life_grid((4, 4)),
-        metrics,
-        alerts=alerts,
-        blink_on=True,
-    ).snapshot()
-    hidden = render_left_panel(
-        _life_grid((4, 4)),
-        metrics,
-        alerts=alerts,
-        blink_on=False,
-    ).snapshot()
+    spectrum = (0.4,) * 9
+    visible = render_left_panel(metrics, spectrum=spectrum, alerts=alerts, blink_on=True).snapshot()
+    hidden = render_left_panel(metrics, spectrum=spectrum, alerts=alerts, blink_on=False).snapshot()
 
-    assert hidden[:13] == visible[:13]
-    assert all(
-        hidden[y][column] == 0
-        for y in range(13, 34)
-        for column in hidden_columns
-    )
-    other_columns = {0, 1, 3, 4, 6, 7} - set(hidden_columns)
-    assert all(
-        hidden[y][column] == visible[y][column]
-        for y in range(13, 34)
-        for column in other_columns
-    )
+    assert hidden[21:] == visible[21:]
+    assert all(hidden[y][column] == 0 for y in range(21) for column in hidden_columns)
+    other_columns = {0, 1, 3, 4, 5, 7, 8} - set(hidden_columns)
+    assert all(hidden[y][column] == visible[y][column] for y in range(21) for column in other_columns)

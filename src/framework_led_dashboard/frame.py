@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 FRAME_WIDTH = 9
 FRAME_HEIGHT = 34
 FramePixels = tuple[tuple[int, ...], ...]

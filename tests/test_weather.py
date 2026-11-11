@@ -6,7 +6,6 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from framework_led_dashboard.battery import BatteryMode, BatteryPower
 from framework_led_dashboard.config import LocationConfig
 from framework_led_dashboard.http_json import JsonHttpClient
 from framework_led_dashboard.location import (
@@ -35,7 +34,7 @@ from framework_led_dashboard.weather_codes import (
     WeatherSymbol,
     classify_weather_code,
 )
-from framework_led_dashboard.weather_icons import weather_icon
+from framework_led_dashboard.weather_icons import ICON_FRAMES, ICON_HEIGHT, ICON_WIDTH, weather_icon
 
 
 def test_vpn_detector_reports_active_for_networkmanager_vpn() -> None:
@@ -374,91 +373,96 @@ DISPLAY_SYMBOLS = tuple(dict.fromkeys(WMO_SYMBOLS.values()))
 
 @pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
 @pytest.mark.parametrize("is_day", [True, False])
-def test_every_weather_symbol_has_two_deterministic_nine_by_eight_frames(
+def test_every_weather_symbol_has_a_deterministic_nine_by_ten_twenty_frame_cycle(
     symbol: WeatherSymbol,
     is_day: bool,
 ) -> None:
-    first = weather_icon(symbol, is_day=is_day, frame_index=0)
-    second = weather_icon(symbol, is_day=is_day, frame_index=1)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
 
-    assert len(first) == len(second) == 8
-    assert all(len(row) == 9 for row in first + second)
-    assert set("".join(first + second)) <= {".", "L", "#"}
-    assert first != second
-    assert weather_icon(symbol, is_day=is_day, frame_index=2) == first
+    assert ICON_WIDTH == 9 and ICON_HEIGHT == 10 and ICON_FRAMES == 20
+    assert all(len(icon) == ICON_HEIGHT for icon in cycle)
+    assert all(len(row) == ICON_WIDTH for icon in cycle for row in icon)
+    assert set("".join(row for icon in cycle for row in icon)) <= {".", "L", "#"}
+    assert len(set(cycle)) > 1
+    assert weather_icon(symbol, is_day=is_day, frame_index=ICON_FRAMES) == cycle[0]
 
 
 @pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
 def test_every_weather_symbol_has_distinct_day_and_night_art(symbol: WeatherSymbol) -> None:
-    assert weather_icon(symbol, is_day=True, frame_index=0) != weather_icon(
-        symbol,
-        is_day=False,
-        frame_index=0,
-    )
+    day = weather_icon(symbol, is_day=True, frame_index=0)
+    night = weather_icon(symbol, is_day=False, frame_index=0)
+
+    assert day != night
+
+
+@pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
+def test_every_night_icon_shows_the_moon_or_a_snowflake_in_a_top_corner(symbol: WeatherSymbol) -> None:
+    night = weather_icon(symbol, is_day=False, frame_index=0)
+
+    corners = ("".join(row[6:9] for row in night[0:4]), "".join(row[0:4] for row in night[2:7]))
+    assert any("#" in corner or "L" in corner for corner in corners)
 
 
 @pytest.mark.parametrize(
     ("light_code", "heavy_code"),
     [(51, 55), (56, 57), (61, 65), (66, 67), (71, 75), (80, 82), (85, 86), (96, 99)],
 )
-def test_light_and_heavy_weather_have_different_particle_density(
-    light_code: int,
-    heavy_code: int,
-) -> None:
-    light = weather_icon(classify_weather_code(light_code), is_day=True, frame_index=0)
-    heavy = weather_icon(classify_weather_code(heavy_code), is_day=True, frame_index=0)
+def test_light_and_heavy_weather_have_different_art(light_code: int, heavy_code: int) -> None:
+    light = [weather_icon(classify_weather_code(light_code), is_day=True, frame_index=i) for i in range(4)]
+    heavy = [weather_icon(classify_weather_code(heavy_code), is_day=True, frame_index=i) for i in range(4)]
 
     assert light != heavy
 
 
-PRECIPITATION_CODES = (
-    51,
-    53,
-    55,
-    56,
-    57,
-    61,
-    63,
-    65,
-    66,
-    67,
-    71,
-    73,
-    75,
-    77,
-    80,
-    81,
-    82,
-    85,
-    86,
-    95,
-    96,
-    99,
-)
+DRIZZLE_AND_RAIN_CODES = (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82)
+SNOW_CODES = (71, 73, 75, 77, 85, 86)
+THUNDER_CODES = (95, 96, 99)
 
 
-def _descending_strokes(icon: tuple[str, ...]) -> set[tuple[int, int]]:
-    return {
-        (x, y)
-        for y in (5, 6)
-        for x in range(8)
-        if icon[y][x] in {"L", "#"} and icon[y + 1][x + 1] in {"L", "#"}
-    }
+def _lit(icon: tuple[str, ...], x: int, y: int) -> bool:
+    return 0 <= x < ICON_WIDTH and 0 <= y < ICON_HEIGHT and icon[y][x] in {"L", "#"}
 
 
-@pytest.mark.parametrize("weather_code", PRECIPITATION_CODES)
+def _down_left_strokes(icon: tuple[str, ...]) -> set[tuple[int, int]]:
+    def continues(x: int, y: int) -> bool:
+        return _lit(icon, x - 1, y + 1) or _lit(icon, x - 2, y + 2)
+
+    return {(x, y) for y in range(5, 9) for x in range(1, 9) if _lit(icon, x, y) and continues(x, y)}
+
+
+@pytest.mark.parametrize("weather_code", DRIZZLE_AND_RAIN_CODES)
 @pytest.mark.parametrize("is_day", [True, False])
-def test_precipitation_uses_moving_diagonal_strokes(
-    weather_code: int,
-    is_day: bool,
-) -> None:
+def test_rain_falls_as_moving_down_left_strokes(weather_code: int, is_day: bool) -> None:
     symbol = classify_weather_code(weather_code)
-    first = _descending_strokes(weather_icon(symbol, is_day=is_day, frame_index=0))
-    second = _descending_strokes(weather_icon(symbol, is_day=is_day, frame_index=1))
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+    strokes = [_down_left_strokes(icon) for icon in cycle]
 
-    assert first
-    assert second
-    assert first != second
+    assert all(strokes)
+    assert len({frozenset(stroke) for stroke in strokes}) > 1
+
+
+@pytest.mark.parametrize("weather_code", SNOW_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_snow_falls_straight_down_in_at_least_three_columns(weather_code: int, is_day: bool) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+
+    flake_columns = {x for icon in cycle for y in range(5, 10) for x in range(9) if _lit(icon, x, y)}
+    assert len(flake_columns) >= 3
+    first_positions = {(x, y) for y in range(5, 10) for x in range(9) if _lit(cycle[0], x, y)}
+    second_positions = {(x, y) for y in range(5, 10) for x in range(9) if _lit(cycle[1], x, y)}
+    assert first_positions != second_positions
+    assert {x for x, _y in first_positions} == {x for x, _y in second_positions}
+
+
+@pytest.mark.parametrize("weather_code", THUNDER_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_thunder_shows_a_flashing_bolt(weather_code: int, is_day: bool) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(4)]
+
+    lit_counts = [sum(row.count("#") for row in icon[5:10]) for icon in cycle]
+    assert max(lit_counts) > min(lit_counts)
 
 
 @pytest.mark.parametrize("weather_code", sorted(SUPPORTED_WEATHER_CODES))
@@ -467,23 +471,19 @@ def test_right_panel_renders_every_documented_weather_code(weather_code: int) ->
         weather=WeatherReading(18.4, weather_code, False),
         weather_frame=1,
         cpu_temperature_c=54,
-        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
     ).snapshot()
 
-    assert any(pixel for row in frame[0:8] for pixel in row)
+    assert any(pixel for row in frame[0:10] for pixel in row)
+    assert frame[10] == (0,) * 9
 
 
 def test_right_panel_uses_daylight_state_for_weather_art() -> None:
-    common = {
-        "weather_frame": 0,
-        "cpu_temperature_c": 54,
-        "battery_power": BatteryPower(BatteryMode.DISCHARGING, 12.4),
-    }
+    common = {"weather_frame": 0, "cpu_temperature_c": 54}
 
     day = render_right_panel(weather=WeatherReading(18.4, 2, True), **common).snapshot()
     night = render_right_panel(weather=WeatherReading(18.4, 2, False), **common).snapshot()
 
-    assert day[0:8] != night[0:8]
+    assert day[0:10] != night[0:10]
 
 
 def test_right_panel_renders_weather_icon_and_outside_temperature_in_assigned_rows() -> None:
@@ -491,29 +491,24 @@ def test_right_panel_renders_weather_icon_and_outside_temperature_in_assigned_ro
         weather=WeatherReading(18.4, 0, True),
         weather_frame=0,
         cpu_temperature_c=54,
-        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12.4),
     ).snapshot()
 
-    assert tuple("".join("#" if pixel else "." for pixel in row) for row in frame[9:14]) == (
+    assert tuple("".join("#" if pixel else "." for pixel in row) for row in frame[11:16]) == (
         ".#.###..#",
         "##.#.#...",
         ".#.###...",
         ".#.#.#...",
         "######...",
     )
-    assert all(pixel == 0 for row in frame[8:9] + frame[14:18] for pixel in row)
-    assert any(pixel for row in frame[0:8] for pixel in row)
+    assert all(pixel == 0 for row in frame[10:11] + frame[16:17] for pixel in row)
+    assert any(pixel for row in frame[0:10] for pixel in row)
 
 
 def test_right_panel_renders_unknown_weather_temperature_dim_without_icon() -> None:
-    frame = render_right_panel(
-        weather=None,
-        cpu_temperature_c=None,
-        battery_power=BatteryPower(BatteryMode.UNKNOWN),
-    ).snapshot()
+    frame = render_right_panel(weather=None, cpu_temperature_c=None).snapshot()
 
-    assert all(pixel == 0 for row in frame[0:8] for pixel in row)
-    assert frame[11] == (0, 24, 24, 24, 0, 24, 24, 24, 0)
+    assert all(pixel == 0 for row in frame[0:10] for pixel in row)
+    assert frame[13] == (0, 24, 24, 24, 0, 24, 24, 24, 0)
 
 
 def _probe_name(command: tuple[str, ...]) -> str:

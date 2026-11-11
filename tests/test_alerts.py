@@ -97,7 +97,6 @@ def test_optional_thresholds_trigger_only_when_configured() -> None:
     disabled = AlertPolicy(AlertsConfig()).update(
         AlertInputs(
             cpu_usage_percent=100,
-            discharge_power_w=100,
             outside_temperature_c=100,
         ),
         now_seconds=0,
@@ -105,7 +104,6 @@ def test_optional_thresholds_trigger_only_when_configured() -> None:
     policy = AlertPolicy(
         AlertsConfig(
             cpu_usage_critical_percent=95,
-            discharge_power_critical_w=35,
             outside_temperature_min_c=-20,
             outside_temperature_max_c=38,
         )
@@ -114,7 +112,6 @@ def test_optional_thresholds_trigger_only_when_configured() -> None:
     upper = policy.update(
         AlertInputs(
             cpu_usage_percent=95,
-            discharge_power_w=35,
             outside_temperature_c=38,
         ),
         now_seconds=0,
@@ -122,7 +119,6 @@ def test_optional_thresholds_trigger_only_when_configured() -> None:
     lower = policy.update(
         AlertInputs(
             cpu_usage_percent=94.9,
-            discharge_power_w=34.9,
             outside_temperature_c=-20,
         ),
         now_seconds=1,
@@ -130,19 +126,15 @@ def test_optional_thresholds_trigger_only_when_configured() -> None:
     normal = policy.update(
         AlertInputs(
             cpu_usage_percent=50,
-            discharge_power_w=10,
             outside_temperature_c=18,
         ),
         now_seconds=2,
     )
 
     assert disabled.cpu_usage is False
-    assert disabled.discharge_power is False
     assert disabled.outside_temperature is False
     assert upper.cpu_usage is True
-    assert upper.discharge_power is True
     assert upper.outside_temperature is True
     assert lower.cpu_usage is False
-    assert lower.discharge_power is False
     assert lower.outside_temperature is True
     assert normal.any_critical is False

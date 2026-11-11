@@ -6,7 +6,6 @@ from typing import Protocol
 
 from .config import PanelsConfig
 
-
 FRAMEWORK_VID = 0x32AC
 LED_MATRIX_PID = 0x0020
 

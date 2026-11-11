@@ -1,13 +1,30 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "framework-led-dashboard"
 version = "0.1.0"
-description = "System dashboard for Framework Laptop LED Matrix input modules"
+description = "System dashboard for the two LED Matrix input modules of a Framework Laptop 16"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Vladyslav Luchkov" }]
 requires-python = ">=3.11"
+keywords = ["framework-laptop", "led-matrix", "dashboard", "systemd", "linux"]
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+]
 dependencies = ["pyserial>=3.5,<4"]
+
+[project.scripts]
+framework-led-dashboard = "framework_led_dashboard.__main__:main"
+
+[project.optional-dependencies]
+tray = ["PyGObject>=3.42", "pycairo>=1.20"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

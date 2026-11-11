@@ -55,7 +55,6 @@ class AlertsConfig:
     ram_available_recovery_percent: float = 8
     ram_critical_seconds: float = 10
     cpu_usage_critical_percent: float | None = None
-    discharge_power_critical_w: float | None = None
     outside_temperature_min_c: float | None = None
     outside_temperature_max_c: float | None = None
 
@@ -63,7 +62,8 @@ class AlertsConfig:
 @dataclass(frozen=True, slots=True)
 class DashboardConfig:
     brightness_percent: int = 40
-    animation_fps: int = 2
+    # Frame-rate cap per panel; grayscale tops out near 7 FPS in firmware, so 10 = hardware-bound.
+    animation_fps: int = 10
     swap_panels: bool = False
     panels: PanelsConfig = PanelsConfig()
     location: LocationConfig = LocationConfig()
@@ -80,6 +80,36 @@ def load_config(path: str | Path) -> DashboardConfig:
         raise ConfigError(f"invalid TOML in {config_path}: {error}") from error
 
     return parse_config(raw)
+
+
+def fill_panel_identities(template: str, *, left: str, right: str) -> str:
+    """Return `template` (TOML text) with the identity lines of both panel sections replaced.
+
+    Works on text so the template's comments and layout survive; the result is validated.
+    """
+    lines = template.splitlines(keepends=True)
+    wanted = {"panels.left": left, "panels.right": right}
+    section = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped.strip("[]").strip()
+        elif section in wanted and stripped.split("=", 1)[0].strip() == "identity":
+            ending = "\n" if line.endswith("\n") else ""
+            lines[index] = f"identity = {_toml_string(wanted.pop(section))}{ending}"
+    if wanted:
+        missing = ", ".join(f"[{name}] identity" for name in wanted)
+        raise ConfigError(f"template has no {missing} line")
+    filled = "".join(lines)
+    try:
+        parse_config(tomllib.loads(filled))
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"filled template is not valid TOML: {error}") from error
+    return filled
+
+
+def _toml_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def parse_config(raw: Mapping[str, Any]) -> DashboardConfig:
@@ -100,7 +130,7 @@ def parse_config(raw: Mapping[str, Any]) -> DashboardConfig:
     if not 0 <= brightness <= 100:
         raise ConfigError("brightness_percent must be between 0 and 100")
 
-    animation_fps = _integer(raw, "animation_fps", 2)
+    animation_fps = _integer(raw, "animation_fps", 10)
     if not 1 <= animation_fps <= 30:
         raise ConfigError("animation_fps must be between 1 and 30")
 
@@ -207,7 +237,6 @@ def _parse_alerts(raw: Mapping[str, Any]) -> AlertsConfig:
         "ram_available_recovery_percent",
         "ram_critical_seconds",
         "cpu_usage_critical_percent",
-        "discharge_power_critical_w",
         "outside_temperature_min_c",
         "outside_temperature_max_c",
     }
@@ -236,10 +265,6 @@ def _parse_alerts(raw: Mapping[str, Any]) -> AlertsConfig:
     if cpu_usage_critical is not None and not 0 < cpu_usage_critical <= 100:
         raise ConfigError("alerts.cpu_usage_critical_percent must be above 0 and at most 100")
 
-    discharge_power_critical = _optional_number(raw, "discharge_power_critical_w", "alerts")
-    if discharge_power_critical is not None and discharge_power_critical <= 0:
-        raise ConfigError("alerts.discharge_power_critical_w must be greater than zero")
-
     outside_min = _optional_number(raw, "outside_temperature_min_c", "alerts")
     outside_max = _optional_number(raw, "outside_temperature_max_c", "alerts")
     if outside_min is not None and outside_max is not None and outside_min >= outside_max:
@@ -256,7 +281,6 @@ def _parse_alerts(raw: Mapping[str, Any]) -> AlertsConfig:
         ram_available_recovery_percent=ram_recovery,
         ram_critical_seconds=ram_critical_seconds,
         cpu_usage_critical_percent=cpu_usage_critical,
-        discharge_power_critical_w=discharge_power_critical,
         outside_temperature_min_c=outside_min,
         outside_temperature_max_c=outside_max,
     )

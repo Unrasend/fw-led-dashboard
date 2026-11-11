@@ -9,8 +9,14 @@ from framework_led_dashboard.matrix_transport import (
     MatrixTransport,
     ReconnectPending,
     TransportError,
+    brightness_command,
     encode_grayscale_frame,
+    prepare_panel,
+    sleep_command,
 )
+
+# ledmatrix firmware parses one command per USB packet and drops the rest of the packet.
+FIRMWARE_USB_PACKET_SIZE = 64
 
 
 class FakeClock:
@@ -19,9 +25,6 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
 
 
 class FakeSerial:
@@ -51,24 +54,6 @@ class FakeSerial:
 
     def close(self) -> None:
         self.closed = True
-
-
-class RateLimitedSerial(FakeSerial):
-    def __init__(self, clock: FakeClock, *, minimum_write_interval: float) -> None:
-        super().__init__()
-        self._clock = clock
-        self._minimum_write_interval = minimum_write_interval
-        self._last_write_at: float | None = None
-
-    def write(self, data: bytes) -> int:
-        if (
-            self._last_write_at is not None
-            and self._clock.now - self._last_write_at < self._minimum_write_interval
-        ):
-            raise OSError("firmware receive buffer overflow")
-        written = super().write(data)
-        self._last_write_at = self._clock.now
-        return written
 
 
 def test_grayscale_frame_matches_official_stage_and_commit_protocol() -> None:
@@ -119,28 +104,27 @@ def test_transport_keeps_one_serial_connection_for_multiple_frames() -> None:
     transport.write_frame(frame)
 
     assert opened_paths == ["/dev/by-id/stable-left"]
-    assert len(serial_connection.writes) == 20
+    assert serial_connection.writes == [*encode_grayscale_frame(frame)] * 2
     assert transport.is_connected is True
 
     transport.close()
     assert serial_connection.closed is True
 
 
-def test_transport_paces_frame_commands_for_rate_limited_firmware() -> None:
-    clock = FakeClock()
-    serial_connection = RateLimitedSerial(clock, minimum_write_interval=0.04)
+def test_transport_writes_each_command_separately_so_firmware_sees_every_command() -> None:
+    serial_connection = FakeSerial()
     transport = MatrixTransport(
         identity="stable-left",
         path_resolver=lambda identity: f"/dev/by-id/{identity}",
         serial_factory=lambda path: serial_connection,
-        clock=clock,
-        sleeper=clock.sleep,
     )
+    frame = [[(x + y) % 256 for x in range(9)] for y in range(34)]
 
-    transport.write_frame([[0] * 9 for _ in range(34)])
+    transport.write_frame(frame)
 
+    assert serial_connection.writes == list(encode_grayscale_frame(frame))
     assert len(serial_connection.writes) == 10
-    assert clock.now == pytest.approx(0.45)
+    assert all(len(write) <= FIRMWARE_USB_PACKET_SIZE for write in serial_connection.writes)
 
 
 def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
@@ -161,7 +145,9 @@ def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
 
     transport.write_frame([[0] * 9 for _ in range(34)])
 
-    assert opened_with["write_timeout"] >= 2.0
+    # A waking panel ignores USB during its fade-in: 255 / 5 steps x 100 ms = 5.1 s.
+    assert opened_with["write_timeout"] >= 5.2
+    assert opened_with["timeout"] >= 5.2
 
 
 def test_write_error_closes_connection_then_resolves_same_identity_after_backoff() -> None:
@@ -199,7 +185,7 @@ def test_write_error_closes_connection_then_resolves_same_identity_after_backoff
     transport.write_frame(frame)
 
     assert resolved_identities == ["stable-left", "stable-left"]
-    assert len(second_connection.writes) == 10
+    assert second_connection.writes == list(encode_grayscale_frame(frame))
     assert transport.is_connected is True
 
 
@@ -257,3 +243,149 @@ def test_read_errors_close_connection_and_enter_reconnect_state(connection: Fake
 
     assert connection.closed is True
     assert transport.is_connected is False
+
+
+class AnswerTracingSerial(FakeSerial):
+    """Record writes and reads in one sequence to check what is written before the answer."""
+
+    def __init__(self) -> None:
+        super().__init__(read_result=bytes(32))
+        self.events: list[str] = []
+
+    def write(self, data: bytes) -> int:
+        self.events.append(f"write {data.hex()}")
+        return super().write(data)
+
+    def read(self, size: int) -> bytes:
+        self.events.append(f"read {size}")
+        return super().read(size)
+
+
+def test_prepare_panel_wakes_with_a_query_and_waits_for_its_answer_before_setup() -> None:
+    connection = AnswerTracingSerial()
+
+    prepare_panel(lambda: 40)(connection)
+
+    # The query is the only write before the read: any later write would block during the
+    # firmware's wake-up fade, while the read simply waits for the answer that follows it.
+    assert connection.events == [
+        "write 32ac00",
+        "read 32",
+        "write 32ac0066",
+        "write 32ac0400",
+    ]
+
+
+@pytest.mark.parametrize(("percent", "level"), [(0, 5), (1, 5), (2, 5), (3, 8), (40, 102), (100, 255)])
+def test_prepare_panel_scales_brightness_percent_to_firmware_level(
+    percent: int,
+    level: int,
+) -> None:
+    connection = FakeSerial(read_result=bytes(32))
+
+    prepare_panel(lambda: percent)(connection)
+
+    assert connection.writes[1] == bytes([0x32, 0xAC, 0x00, level])
+
+
+def test_prepare_panel_rejects_a_panel_that_does_not_answer() -> None:
+    with pytest.raises(OSError, match="did not answer"):
+        prepare_panel(lambda: 40)(FakeSerial(read_result=b"short"))
+
+
+def test_brightness_never_goes_below_the_firmware_fade_step() -> None:
+    # ledmatrix fades a waking panel in with `old_brightness - 5` on a u8: a stored level below 5
+    # wraps to ~250, so the panel flares to full brightness before dropping back.
+    assert all(brightness_command(percent)[3] >= 5 for percent in range(101))
+
+
+@pytest.mark.parametrize("percent", [-1, 101, True, 40.0])
+def test_brightness_command_rejects_invalid_percent(percent: object) -> None:
+    with pytest.raises(ValueError, match="brightness"):
+        brightness_command(percent)
+
+
+def test_prepare_panel_uses_the_brightness_current_at_each_connection() -> None:
+    brightness = [40]
+    prepare = prepare_panel(lambda: brightness[0])
+    first = FakeSerial(read_result=bytes(32))
+    second = FakeSerial(read_result=bytes(32))
+
+    prepare(first)
+    brightness[0] = 100
+    prepare(second)
+
+    assert first.writes[1] == brightness_command(40)
+    assert second.writes[1] == brightness_command(100)
+
+
+def test_sleep_command_matches_firmware_protocol() -> None:
+    assert sleep_command(True) == bytes([0x32, 0xAC, 0x03, 0x01])
+    assert sleep_command(False) == bytes([0x32, 0xAC, 0x03, 0x00])
+
+
+def test_transport_sends_a_single_command_as_one_write() -> None:
+    connection = FakeSerial()
+    transport = MatrixTransport(
+        identity="stable-left",
+        path_resolver=lambda identity: f"/dev/by-id/{identity}",
+        serial_factory=lambda path: connection,
+    )
+
+    transport.send(brightness_command(60))
+
+    assert connection.writes == [bytes([0x32, 0xAC, 0x00, 153])]
+
+
+def test_transport_prepares_every_new_connection_before_its_first_frame() -> None:
+    clock = FakeClock()
+    first_connection = FakeSerial(fail_write_at=0)
+    second_connection = FakeSerial()
+    connections = iter([first_connection, second_connection])
+    prepared: list[FakeSerial] = []
+
+    def on_connect(connection: FakeSerial) -> None:
+        assert connection.writes == []
+        prepared.append(connection)
+
+    transport = MatrixTransport(
+        identity="stable-left",
+        path_resolver=lambda identity: f"/dev/by-id/{identity}",
+        serial_factory=lambda path: next(connections),
+        clock=clock,
+        reconnect_initial_seconds=1,
+        on_connect=on_connect,
+    )
+    frame = [[0] * 9 for _ in range(34)]
+
+    with pytest.raises(TransportError):
+        transport.write_frame(frame)
+    clock.now = 1
+    transport.write_frame(frame)
+    transport.write_frame(frame)
+
+    assert prepared == [first_connection, second_connection]
+
+
+def test_failed_panel_preparation_closes_connection_and_backs_off() -> None:
+    clock = FakeClock()
+    connection = FakeSerial()
+
+    def on_connect(_connection: FakeSerial) -> None:
+        raise OSError("panel did not answer")
+
+    transport = MatrixTransport(
+        identity="stable-right",
+        path_resolver=lambda identity: f"/dev/by-id/{identity}",
+        serial_factory=lambda path: connection,
+        clock=clock,
+        reconnect_initial_seconds=1,
+        on_connect=on_connect,
+    )
+
+    with pytest.raises(TransportError, match="did not answer"):
+        transport.write_frame([[0] * 9 for _ in range(34)])
+    assert connection.closed is True
+    assert connection.writes == []
+    with pytest.raises(ReconnectPending):
+        transport.write_frame([[0] * 9 for _ in range(34)])

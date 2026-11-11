@@ -2,3 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+build/
+*.egg-info/
+.claude-bridge/
+# personal config and working notes stay local
+config.toml
+tasks/

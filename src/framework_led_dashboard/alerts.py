@@ -12,7 +12,6 @@ class AlertInputs:
     cpu_usage_percent: float | None = None
     ram_available_percent: float | None = None
     cpu_temperature_c: float | None = None
-    discharge_power_w: float | None = None
     outside_temperature_c: float | None = None
 
 
@@ -22,7 +21,6 @@ class AlertState:
     cpu_usage: bool = False
     ram: bool = False
     cpu_temperature: bool = False
-    discharge_power: bool = False
     outside_temperature: bool = False
 
     @property
@@ -33,7 +31,6 @@ class AlertState:
                 self.cpu_usage,
                 self.ram,
                 self.cpu_temperature,
-                self.discharge_power,
                 self.outside_temperature,
             )
         )
@@ -68,10 +65,6 @@ class AlertPolicy:
                 active=self._state.cpu_temperature,
                 critical=self._config.cpu_temperature_critical_c,
                 recovery=self._config.cpu_temperature_recovery_c,
-            ),
-            discharge_power=_optional_high(
-                inputs.discharge_power_w,
-                self._config.discharge_power_critical_w,
             ),
             outside_temperature=_outside_range(
                 inputs.outside_temperature_c,

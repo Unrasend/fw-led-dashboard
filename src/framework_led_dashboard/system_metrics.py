@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import math
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+
+class FileSystemStats(Protocol):
+    f_blocks: int
+    f_bfree: int
+    f_bavail: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -10,10 +19,13 @@ class SystemMetrics:
     battery_percent: float | None
     cpu_percent: float | None
     ram_used_percent: float | None
+    gpu_percent: float | None = None
+    swap_used_percent: float | None = None
+    disk_used_percent: float | None = None
 
 
 class SystemMetricsProvider:
-    """Read the three values used by the left panel from Linux virtual files."""
+    """Read every value the left panel's bars can show from Linux virtual files."""
 
     def __init__(
         self,
@@ -21,17 +33,27 @@ class SystemMetricsProvider:
         proc_stat_path: Path = Path("/proc/stat"),
         meminfo_path: Path = Path("/proc/meminfo"),
         battery_capacity_path: Path = Path("/sys/class/power_supply/BAT1/capacity"),
+        drm_root: Path = Path("/sys/class/drm"),
+        disk_path: Path = Path("/"),
+        statvfs: Callable[[Path], FileSystemStats] = os.statvfs,
     ) -> None:
         self._proc_stat_path = proc_stat_path
         self._meminfo_path = meminfo_path
         self._battery_capacity_path = battery_capacity_path
+        self._drm_root = drm_root
+        self._disk_path = disk_path
+        self._statvfs = statvfs
         self._previous_cpu_times: tuple[float, float] | None = None
 
     def read(self) -> SystemMetrics:
+        ram_used, swap_used = self._read_memory_used_percent()
         return SystemMetrics(
             battery_percent=self._read_battery_percent(),
             cpu_percent=self._read_cpu_percent(),
-            ram_used_percent=self._read_ram_used_percent(),
+            ram_used_percent=ram_used,
+            gpu_percent=self._read_gpu_percent(),
+            swap_used_percent=swap_used,
+            disk_used_percent=self._read_disk_used_percent(),
         )
 
     def _read_battery_percent(self) -> float | None:
@@ -66,7 +88,7 @@ class SystemMetricsProvider:
             return None
         return max(0.0, min(100.0, 100 * (total_delta - idle_delta) / total_delta))
 
-    def _read_ram_used_percent(self) -> float | None:
+    def _read_memory_used_percent(self) -> tuple[float | None, float | None]:
         try:
             values = {
                 key: float(raw_value.split()[0])
@@ -74,11 +96,47 @@ class SystemMetricsProvider:
                 if ":" in line
                 for key, raw_value in [line.split(":", 1)]
             }
-            total = values["MemTotal"]
-            available = values["MemAvailable"]
-        except (OSError, ValueError, KeyError, IndexError):
-            return None
+        except (OSError, ValueError, IndexError):
+            return None, None
+        ram = _used_percent(values.get("MemTotal"), values.get("MemAvailable"))
+        swap = _used_percent(values.get("SwapTotal"), values.get("SwapFree"))
+        return ram, swap
 
-        if total <= 0 or available < 0:
+    def _read_gpu_percent(self) -> float | None:
+        """Busiest awake GPU; a runtime-suspended GPU is skipped so polling never wakes it."""
+        readings = []
+        try:
+            busy_files = sorted(self._drm_root.glob("card*/device/gpu_busy_percent"))
+        except OSError:
             return None
-        return max(0.0, min(100.0, 100 * (total - available) / total))
+        for busy_file in busy_files:
+            status_file = busy_file.parent / "power" / "runtime_status"
+            try:
+                if status_file.read_text(encoding="utf-8").strip() == "suspended":
+                    continue
+            except OSError:
+                pass
+            try:
+                value = float(busy_file.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                continue
+            if math.isfinite(value) and 0 <= value <= 100:
+                readings.append(value)
+        return max(readings) if readings else None
+
+    def _read_disk_used_percent(self) -> float | None:
+        try:
+            stats = self._statvfs(self._disk_path)
+        except OSError:
+            return None
+        used = stats.f_blocks - stats.f_bfree
+        visible = used + stats.f_bavail  # df semantics: ignore blocks reserved for root
+        if used < 0 or visible <= 0:
+            return None
+        return max(0.0, min(100.0, 100 * used / visible))
+
+
+def _used_percent(total: float | None, free: float | None) -> float | None:
+    if total is None or free is None or total <= 0 or free < 0:
+        return None
+    return max(0.0, min(100.0, 100 * (total - free) / total))

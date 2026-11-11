@@ -1,0 +1,26 @@
+[Unit]
+Description=Framework 16 LED Matrix dashboard (both panels)
+# The equalizer captures the microphone through PipeWire's Pulse server. Start after it so the
+# first capture does not race the audio stack at login (that race killed the old visualizer).
+Wants=pipewire-pulse.socket
+After=pipewire.service pipewire-pulse.service pipewire-pulse.socket
+
+[Service]
+Type=exec
+ExecStart=%h/.local/share/framework-led-dashboard/venv/bin/framework-led-dashboard --run %h/.config/framework-led-dashboard/config.toml
+Environment=PYTHONUNBUFFERED=1
+SyslogIdentifier=framework-led-dashboard
+# Panels, microphone and weather recover inside the daemon; restart only if the process dies,
+# waiting 2 s, growing in 5 steps up to 60 s.
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=60s
+# 2 = configuration error: restarting cannot fix it.
+RestartPreventExitStatus=2
+# On SIGTERM the daemon finishes the frame in flight, then blanks and closes both panels.
+TimeoutStopSec=20s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

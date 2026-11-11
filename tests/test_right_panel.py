@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from framework_led_dashboard.alerts import AlertState
-from framework_led_dashboard.battery import BatteryMode, BatteryPower, BatteryPowerProvider
 from framework_led_dashboard.frame import Frame
 from framework_led_dashboard.pixel_font import draw_text
 from framework_led_dashboard.right_panel import render_right_panel
@@ -102,172 +101,60 @@ def test_cpu_temperature_returns_unknown_for_bad_values(
     assert CpuTemperatureProvider(hwmon_root=tmp_path).read_celsius() is None
 
 
-def _write_battery_files(root: Path, **values: str) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    for name, value in values.items():
-        (root / name).write_text(f"{value}\n", encoding="utf-8")
-
-
-def test_battery_power_prefers_power_now_while_discharging(tmp_path: Path) -> None:
-    _write_battery_files(
-        tmp_path,
-        status="Discharging",
-        power_now="12360000",
-        current_now="9000000",
-        voltage_now="20000000",
-    )
-
-    reading = BatteryPowerProvider(battery_root=tmp_path).read()
-
-    assert reading.mode is BatteryMode.DISCHARGING
-    assert reading.watts == pytest.approx(12.36)
-
-
-def test_battery_power_falls_back_to_current_times_voltage(tmp_path: Path) -> None:
-    _write_battery_files(
-        tmp_path,
-        status="Discharging",
-        current_now="800000",
-        voltage_now="15000000",
-    )
-
-    reading = BatteryPowerProvider(battery_root=tmp_path).read()
-
-    assert reading.mode is BatteryMode.DISCHARGING
-    assert reading.watts == pytest.approx(12)
-
-
-def test_battery_power_smooths_consecutive_discharge_samples(tmp_path: Path) -> None:
-    _write_battery_files(tmp_path, status="Discharging", power_now="10000000")
-    provider = BatteryPowerProvider(battery_root=tmp_path, smoothing_factor=0.5)
-    assert provider.read().watts == pytest.approx(10)
-
-    (tmp_path / "power_now").write_text("14000000\n", encoding="utf-8")
-
-    assert provider.read().watts == pytest.approx(12)
-
-
-@pytest.mark.parametrize(
-    ("status", "expected_mode"),
-    [("Charging", BatteryMode.CHARGING), ("Full", BatteryMode.AC), ("Not charging", BatteryMode.AC)],
-)
-def test_battery_power_reports_non_discharge_states(
-    tmp_path: Path,
-    status: str,
-    expected_mode: BatteryMode,
-) -> None:
-    _write_battery_files(tmp_path, status=status, power_now="12000000")
-
-    reading = BatteryPowerProvider(battery_root=tmp_path).read()
-
-    assert reading.mode is expected_mode
-    assert reading.watts is None
-
-
-def test_battery_power_returns_unknown_for_missing_status(tmp_path: Path) -> None:
-    reading = BatteryPowerProvider(battery_root=tmp_path).read()
-
-    assert reading.mode is BatteryMode.UNKNOWN
-    assert reading.watts is None
-
-
-def test_battery_power_returns_unknown_watts_for_malformed_discharge_data(
-    tmp_path: Path,
-) -> None:
-    _write_battery_files(
-        tmp_path,
-        status="Discharging",
-        power_now="broken",
-        current_now="broken",
-        voltage_now="15000000",
-    )
-
-    reading = BatteryPowerProvider(battery_root=tmp_path).read()
-
-    assert reading.mode is BatteryMode.DISCHARGING
-    assert reading.watts is None
-
-
 @pytest.mark.parametrize(
     ("temperature", "expected_text", "expected_x", "expected_spacing", "intensity"),
     [
-        (54, "C54", 0, 0, 220),
+        (54, "54", 1, 1, 220),
         (105, "105", 0, 0, 220),
         (None, "--", 1, 1, 24),
         (float("nan"), "--", 1, 1, 24),
     ],
 )
-def test_right_panel_renders_cpu_temperature_in_rows_eighteen_to_twenty_two(
+def test_right_panel_renders_cpu_temperature_without_unit_in_rows_seventeen_to_twenty_one(
     temperature: float | None,
     expected_text: str,
     expected_x: int,
     expected_spacing: int,
     intensity: int,
 ) -> None:
-    actual = render_right_panel(
-        cpu_temperature_c=temperature,
-        battery_power=BatteryPower(mode=BatteryMode.UNKNOWN),
-    ).snapshot()
+    actual = render_right_panel(cpu_temperature_c=temperature).snapshot()
     expected = Frame()
-    draw_text(
-        expected,
-        expected_text,
-        x=expected_x,
-        y=18,
-        spacing=expected_spacing,
-        intensity=intensity,
-    )
+    draw_text(expected, expected_text, x=expected_x, y=17, spacing=expected_spacing, intensity=intensity)
 
-    assert actual[18:23] == expected.snapshot()[18:23]
-
-
-@pytest.mark.parametrize(
-    ("power", "expected_text", "expected_x", "expected_spacing", "intensity"),
-    [
-        (BatteryPower(BatteryMode.DISCHARGING, 12.4), "12W", 0, 0, 220),
-        (BatteryPower(BatteryMode.CHARGING), "CHG", 0, 0, 220),
-        (BatteryPower(BatteryMode.AC), "AC", 1, 1, 220),
-        (BatteryPower(BatteryMode.UNKNOWN), "--", 1, 1, 24),
-        (BatteryPower(BatteryMode.DISCHARGING), "--", 1, 1, 24),
-    ],
-)
-def test_right_panel_renders_power_state_in_rows_twenty_seven_to_thirty_one(
-    power: BatteryPower,
-    expected_text: str,
-    expected_x: int,
-    expected_spacing: int,
-    intensity: int,
-) -> None:
-    actual = render_right_panel(cpu_temperature_c=None, battery_power=power).snapshot()
-    expected = Frame()
-    draw_text(
-        expected,
-        expected_text,
-        x=expected_x,
-        y=27,
-        spacing=expected_spacing,
-        intensity=intensity,
-    )
-
-    assert actual[27:32] == expected.snapshot()[27:32]
+    assert actual[17:22] == expected.snapshot()[17:22]
 
 
 def test_right_panel_keeps_local_widgets_inside_assigned_rows() -> None:
-    frame = render_right_panel(
-        cpu_temperature_c=105,
-        battery_power=BatteryPower(BatteryMode.DISCHARGING, 12),
-    ).snapshot()
+    frame = render_right_panel(cpu_temperature_c=105).snapshot()
 
     lit_rows = {y for y, row in enumerate(frame) if any(row)}
-    assert lit_rows <= set(range(9, 14)) | set(range(18, 23)) | set(range(27, 32))
+    assert lit_rows <= set(range(11, 16)) | set(range(17, 22))
+
+
+def test_right_panel_draws_equalizer_in_rows_twenty_three_to_thirty_three() -> None:
+    levels = (1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1 / 11)
+
+    frame = render_right_panel(cpu_temperature_c=None, spectrum=levels).snapshot()
+
+    column = lambda x: tuple(frame[y][x] for y in range(23, 34))
+    assert column(0) == (220,) + (128,) * 10
+    assert column(1) == (0,) * 5 + (220,) + (128,) * 5
+    assert column(2) == (0,) * 11
+    assert column(8) == (0,) * 10 + (220,)
+    assert all(frame[y][x] == 0 for y in range(22, 23) for x in range(9))
+
+
+def test_right_panel_leaves_equalizer_dark_without_microphone() -> None:
+    frame = render_right_panel(cpu_temperature_c=54, spectrum=None).snapshot()
+
+    assert all(pixel == 0 for y in range(22, 34) for pixel in frame[y])
 
 
 @pytest.mark.parametrize(
     ("alerts", "hidden_rows"),
     [
-        (AlertState(outside_temperature=True), range(9, 14)),
-        (AlertState(cpu_temperature=True), range(18, 23)),
-        (AlertState(discharge_power=True), range(27, 32)),
+        (AlertState(outside_temperature=True), range(11, 16)),
+        (AlertState(cpu_temperature=True), range(17, 22)),
     ],
 )
 def test_right_panel_blinks_only_the_critical_value(
@@ -277,7 +164,7 @@ def test_right_panel_blinks_only_the_critical_value(
     arguments = {
         "weather": WeatherReading(18.4, 2, True),
         "cpu_temperature_c": 120,
-        "battery_power": BatteryPower(BatteryMode.DISCHARGING, 36),
+        "spectrum": (0.3,) * 9,
         "alerts": alerts,
     }
     visible = render_right_panel(**arguments, blink_on=True).snapshot()
@@ -286,3 +173,109 @@ def test_right_panel_blinks_only_the_critical_value(
     assert all(pixel == 0 for y in hidden_rows for pixel in hidden[y])
     other_rows = set(range(34)) - set(hidden_rows)
     assert all(hidden[y] == visible[y] for y in other_rows)
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected_rows"),
+    [
+        pytest.param(
+            29.0,
+            (
+                "######..#",
+                "..##.#...",
+                "######...",
+                "#....#...",
+                "######...",
+            ),
+            id="29-unchanged",
+        ),
+        pytest.param(
+            2.0,
+            (
+                "..###...#",
+                "....#....",
+                "..###....",
+                "..#......",
+                "..###....",
+            ),
+            id="2-unchanged",
+        ),
+        pytest.param(
+            -1.0,
+            (
+                ".....#..#",
+                "....##...",
+                "###..#...",
+                ".....#...",
+                "....###..",
+            ),
+            id="minus-1",
+        ),
+        pytest.param(
+            -5.0,
+            (
+                "....###.#",
+                "....#....",
+                "###.###..",
+                "......#..",
+                "....###..",
+            ),
+            id="minus-5",
+        ),
+        pytest.param(
+            -9.6,
+            (
+                "...#..###",
+                "..##..#.#",
+                "#..#..#.#",
+                "...#..#.#",
+                "..###.###",
+            ),
+            id="minus-10",
+        ),
+        pytest.param(
+            -15.0,
+            (
+                "...#..###",
+                "..##..#..",
+                "#..#..###",
+                "...#....#",
+                "..###.###",
+            ),
+            id="minus-15",
+        ),
+        pytest.param(
+            -20.0,
+            (
+                "..###.###",
+                "....#.#.#",
+                "#.###.#.#",
+                "..#...#.#",
+                "..###.###",
+            ),
+            id="minus-20",
+        ),
+        pytest.param(
+            -99.6,
+            (
+                "..###.###",
+                "..#.#.#.#",
+                "#.###.###",
+                "....#...#",
+                "..###.###",
+            ),
+            id="clamp-99",
+        ),
+    ],
+)
+def test_right_panel_keeps_negative_outside_temperature_glyphs_apart(
+    temperature: float,
+    expected_rows: tuple[str, ...],
+) -> None:
+    frame = render_right_panel(
+        cpu_temperature_c=None,
+        weather=WeatherReading(temperature, 0, True),
+    ).snapshot()
+
+    rendered = tuple("".join("#" if pixel else "." for pixel in row) for row in frame[11:16])
+    assert rendered == expected_rows
