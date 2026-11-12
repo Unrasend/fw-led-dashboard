@@ -27,8 +27,10 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
   restarts.
 - **Runs unattended:** systemd user service; recovers from suspend/resume, USB reconnects,
   PipeWire restarts and network loss (the last weather reading is shown for up to 2 h).
-- **Light:** about 6 frames per second per panel (the firmware's grayscale limit) at ~5 % of
-  one CPU core and ~20 MB of memory.
+- **Light:** about 6 frames per second per panel (the firmware's grayscale limit) for about
+  25 ms of CPU time per second on a Ryzen 7 7840HS, two thirds of it the equalizer's FFT, and
+  ~20 MB of memory. With the panels off it drops to ~1.5 ms per second and the microphone is
+  released.
 
 ## Requirements
 
@@ -177,6 +179,15 @@ One process owns both panels: a sender thread per panel, a 1 Hz sensor loop, a w
 a `parec` capture with a small FFT for the spectrum, and a Unix socket
 (`$XDG_RUNTIME_DIR/framework-led-dashboard.sock`, owner-only) for the tray. Renderers are pure
 functions from state to a 9×34 grayscale frame.
+
+Where the CPU time goes, and how it is kept down (pure Python, no numpy):
+
+- **Spectrum:** 31 windows of 512 samples a second. The 512 real samples go through one
+  256-point complex FFT and only the bins up to 6 kHz are unpacked; samples are converted a
+  whole window at a time. The capture stops while the panels are off.
+- **Panels:** each grayscale frame is 10 USB writes. A frame identical to the one shown is
+  skipped, with a resend every 2 s so a panel that lost its picture gets it back.
+- **Sensors:** hwmon and DRM directories are searched once a minute, not every second.
 
 Firmware details worth knowing if you write your own LED Matrix code:
 

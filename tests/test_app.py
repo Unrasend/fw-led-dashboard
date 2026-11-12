@@ -14,6 +14,7 @@ from framework_led_dashboard.alerts import AlertPolicy, AlertState
 from framework_led_dashboard.app import (
     BLANK_FRAME,
     DISABLED_POLL_SECONDS,
+    FRAME_RESEND_SECONDS,
     SLEEP_REFRESH_SECONDS,
     Dashboard,
     DashboardSnapshot,
@@ -397,7 +398,40 @@ def test_panel_worker_applies_each_brightness_change_once() -> None:
     worker.step()
 
     assert transport.commands == [brightness_command(40), brightness_command(70)]
-    assert transport.frames == ["frame"] * 4
+    assert transport.frames == ["frame"]  # unchanged frames are not resent
+
+
+def test_panel_worker_sends_only_changed_frames_plus_a_periodic_resend() -> None:
+    clock = FakeClock()
+    transport = FakeTransport()
+    frames = iter(["a", "a", "b", "b", "b", "b"])
+    worker = PanelWorker(
+        "left", transport, lambda _now: next(frames), settings=always(ON), max_fps=10, clock=clock
+    )
+
+    for now in (0.0, 0.1, 0.2, 0.3, 2.1, 2.2):
+        clock.now = now
+        worker.step()
+
+    # "a" once; "b" when it changes and again FRAME_RESEND_SECONDS after it was sent.
+    assert FRAME_RESEND_SECONDS == 2.0
+    assert transport.frames == ["a", "b", "b"]
+
+
+def test_panel_worker_notices_a_lost_panel_at_the_resend_and_redraws_it_at_once() -> None:
+    clock = FakeClock()
+    # The first write lands; the panel then goes away, which the periodic resend finds out.
+    transport = FakeTransport((None, TransportError("gone")))
+    worker = PanelWorker(
+        "left", transport, lambda _now: "frame", settings=always(ON), max_fps=10, clock=clock
+    )
+
+    for now in (0.0, 1.0, 2.0, 2.1):
+        clock.now = now
+        worker.step()
+
+    # 0.0 sent, 1.0 skipped, 2.0 resend fails, 2.1 the reconnected panel gets it right away.
+    assert transport.frames == ["frame", "frame"]
 
 
 def test_panel_worker_sleeps_the_panel_while_off_and_resumes_frames_when_on() -> None:
@@ -476,7 +510,7 @@ def test_panel_worker_shutdown_tolerates_an_unreachable_panel() -> None:
 
 def test_microphone_watch_logs_only_availability_changes(caplog: pytest.LogCaptureFixture) -> None:
     microphone = FakeMicrophone()
-    watch = MicrophoneWatch(microphone, interval_seconds=1.0)
+    watch = MicrophoneWatch(microphone, interval_seconds=1.0, startup_grace_seconds=0)
 
     with caplog.at_level(logging.INFO):
         for current in (None, None, LEVELS, LEVELS, None):
@@ -488,6 +522,63 @@ def test_microphone_watch_logs_only_availability_changes(caplog: pytest.LogCaptu
         "microphone available",
         "microphone unavailable, equalizer dark",
     ]
+
+
+def test_microphone_watch_releases_the_microphone_while_the_panels_are_off(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    microphone = FakeMicrophone()
+    microphone.current = LEVELS
+    panels_on = [True]
+    now = [0.0]
+    watch = MicrophoneWatch(
+        microphone,
+        wanted=lambda: panels_on[0],
+        startup_grace_seconds=2.0,
+        clock=lambda: now[0],
+    )
+
+    with caplog.at_level(logging.INFO):
+        now[0] = 2.0
+        watch.step()  # running since Dashboard.start(), past its grace: judged
+        panels_on[0] = False
+        now[0] = 3.0
+        watch.step()
+        assert microphone.stopped is True
+        microphone.current = None  # stopped: no levels, but no "unavailable" either
+        now[0] = 9.0
+        watch.step()
+        microphone.started = False
+        panels_on[0] = True
+        now[0] = 10.0
+        watch.step()  # restarted, within its grace: not judged yet
+        assert microphone.started is True
+        now[0] = 12.0
+        microphone.current = LEVELS
+        watch.step()
+
+    assert _messages(caplog) == [
+        "microphone available",
+        "panels off: microphone released",
+        "panels on: microphone capture resumed",
+        "microphone available",
+    ]
+
+
+def test_microphone_watch_gives_a_slow_capture_its_grace_before_calling_it_dark(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    microphone = FakeMicrophone()
+    now = [0.0]
+    watch = MicrophoneWatch(microphone, startup_grace_seconds=2.0, clock=lambda: now[0])
+
+    with caplog.at_level(logging.INFO):
+        now[0] = 1.0
+        watch.step()
+        now[0] = 2.0
+        watch.step()
+
+    assert _messages(caplog) == ["microphone unavailable, equalizer dark"]
 
 
 def test_dashboard_stop_shuts_panels_down_after_their_loops_end() -> None:

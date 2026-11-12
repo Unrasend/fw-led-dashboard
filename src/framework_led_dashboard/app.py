@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import threading
@@ -55,9 +56,10 @@ from .weather import OpenMeteoWeatherClient, WeatherProvider, WeatherReading
 BLANK_FRAME: FramePixels = tuple(tuple(0 for _ in range(FRAME_WIDTH)) for _ in range(FRAME_HEIGHT))
 WEATHER_RETRY_INITIAL_SECONDS = 30.0
 WEATHER_STALE_MIN_SECONDS = 2 * 60 * 60
-MICROPHONE_WATCH_DELAY_SECONDS = 2.0
+MICROPHONE_STARTUP_GRACE_SECONDS = 2.0
 JOIN_TIMEOUT_SECONDS = 5.0
 DISABLED_POLL_SECONDS = 0.25
+FRAME_RESEND_SECONDS = 2.0
 SLEEP_REFRESH_SECONDS = 5.0
 UNKNOWN_METRICS = SystemMetrics(battery_percent=None, cpu_percent=None, ram_used_percent=None)
 NO_ALERTS = AlertState()
@@ -269,7 +271,11 @@ class WeatherUpdater:
 
 class PanelWorker:
     """Drive one panel: frames as fast as it accepts them (capped at `max_fps`) while on,
-    firmware sleep while off, brightness changes as soon as the settings change."""
+    firmware sleep while off, brightness changes as soon as the settings change.
+
+    A frame identical to the one on the panel is not sent again (each costs 10 USB writes),
+    except every FRAME_RESEND_SECONDS: that restores a panel that lost its picture on its own
+    and keeps noticing a panel that went away."""
 
     def __init__(
         self,
@@ -292,6 +298,8 @@ class PanelWorker:
         self._connected: bool | None = None
         self._brightness: int | None = None
         self._slept_at: float | None = None
+        self._shown: FramePixels | None = None
+        self._shown_at = -math.inf
 
     def step(self) -> float:
         settings = self._settings()
@@ -301,6 +309,7 @@ class PanelWorker:
             else:
                 delay = self._keep_asleep()
         except ReconnectPending as pending:
+            self._shown = None
             return pending.retry_after_seconds
         except TransportError as error:
             if self._connected is not False:
@@ -309,6 +318,7 @@ class PanelWorker:
             # A fresh connection wakes the panel and sets brightness: redo both from scratch.
             self._brightness = None
             self._slept_at = None
+            self._shown = None
             return 0.0
 
         if self._connected is not True:
@@ -330,7 +340,10 @@ class PanelWorker:
         if brightness_percent != self._brightness:
             self._transport.send(brightness_command(brightness_percent))
             self._brightness = brightness_percent
-        self._transport.write_frame(self._render(started))
+        frame = self._render(started)
+        if frame != self._shown or started - self._shown_at >= FRAME_RESEND_SECONDS:
+            self._transport.write_frame(frame)
+            self._shown, self._shown_at = frame, started
         self._slept_at = None
         return max(0.0, self._frame_interval - (self._clock() - started))
 
@@ -338,6 +351,7 @@ class PanelWorker:
         # Sleep is idempotent in firmware; repeating it puts back to sleep a panel that woke
         # on its own (e.g. after resume) without the dashboard noticing.
         now = self._clock()
+        self._shown = None  # whatever it showed is gone once it sleeps
         if self._slept_at is None or now - self._slept_at >= SLEEP_REFRESH_SECONDS:
             self._transport.send(sleep_command(True))
             self._slept_at = now
@@ -345,19 +359,47 @@ class PanelWorker:
 
 
 class MicrophoneWatch:
+    """Capture from the microphone only while the panels are on, and log when it comes and goes.
+
+    Releasing it while the panels are off saves the spectrum analysis and frees the microphone
+    (desktops show it as in use while parec runs). A capture that just (re)started gets
+    `startup_grace_seconds` before it counts as unavailable.
+    """
+
     def __init__(
         self,
         microphone: Microphone,
         *,
+        wanted: Callable[[], bool] = lambda: True,
         interval_seconds: float = 1.0,
+        startup_grace_seconds: float = MICROPHONE_STARTUP_GRACE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger = LOGGER,
     ) -> None:
         self._microphone = microphone
+        self._wanted = wanted
         self._interval = interval_seconds
+        self._grace = startup_grace_seconds
+        self._clock = clock
         self._logger = logger
+        self._capturing = True  # Dashboard.start() starts the capture
+        self._judge_after = clock() + startup_grace_seconds
         self._available: bool | None = None
 
     def step(self) -> float:
+        wanted = self._wanted()
+        if wanted != self._capturing:
+            self._capturing = wanted
+            self._available = None
+            if wanted:
+                self._microphone.start()
+                self._judge_after = self._clock() + self._grace
+                self._logger.info("panels on: microphone capture resumed")
+            else:
+                self._microphone.stop()
+                self._logger.info("panels off: microphone released")
+        if not self._capturing or self._clock() < self._judge_after:
+            return self._interval
         available = self._microphone.levels() is not None
         if available != self._available:
             if available:
@@ -492,8 +534,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         Loop("weather", weather.step),
         Loop(
             "microphone-watch",
-            MicrophoneWatch(microphone).step,
-            initial_delay_seconds=MICROPHONE_WATCH_DELAY_SECONDS,
+            MicrophoneWatch(microphone, wanted=lambda: store.current().enabled).step,
         ),
         Loop("control", control.step),
     )

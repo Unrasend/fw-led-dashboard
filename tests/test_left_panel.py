@@ -311,3 +311,33 @@ def test_left_panel_blinks_only_the_critical_bar(
     assert all(hidden[y][column] == 0 for y in range(21) for column in hidden_columns)
     other_columns = {0, 1, 3, 4, 5, 7, 8} - set(hidden_columns)
     assert all(hidden[y][column] == visible[y][column] for y in range(21) for column in other_columns)
+
+
+def test_system_metrics_looks_for_gpus_once_a_minute_or_when_one_vanishes(tmp_path: Path) -> None:
+    drm = tmp_path / "drm"
+    _gpu_card(drm, "card1", "16\n")
+    now = [0.0]
+    provider = SystemMetricsProvider(
+        proc_stat_path=tmp_path / "missing-stat",
+        meminfo_path=tmp_path / "missing-meminfo",
+        battery_capacity_path=tmp_path / "missing-capacity",
+        drm_root=drm,
+        statvfs=_statvfs(blocks=0, free=0, available=0),
+        clock=lambda: now[0],
+        rescan_seconds=60,
+    )
+    assert provider.read().gpu_percent == 16
+
+    _gpu_card(drm, "card2", "70\n")
+    now[0] = 59.0
+    assert provider.read().gpu_percent == 16  # the new card is not looked for yet
+    now[0] = 60.0
+    assert provider.read().gpu_percent == 70
+
+    for card in ("card1", "card2"):
+        (drm / card / "device" / "gpu_busy_percent").unlink()
+    now[0] = 61.0
+    assert provider.read().gpu_percent is None
+    _gpu_card(drm, "card3", "33\n")
+    now[0] = 62.0
+    assert provider.read().gpu_percent == 33  # a vanished file triggered a new search

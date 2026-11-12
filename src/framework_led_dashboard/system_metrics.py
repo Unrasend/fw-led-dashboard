@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+DEVICE_RESCAN_SECONDS = 60.0
 
 
 class FileSystemStats(Protocol):
@@ -36,11 +39,17 @@ class SystemMetricsProvider:
         drm_root: Path = Path("/sys/class/drm"),
         disk_path: Path = Path("/"),
         statvfs: Callable[[Path], FileSystemStats] = os.statvfs,
+        clock: Callable[[], float] = time.monotonic,
+        rescan_seconds: float = DEVICE_RESCAN_SECONDS,
     ) -> None:
         self._proc_stat_path = proc_stat_path
         self._meminfo_path = meminfo_path
         self._battery_capacity_path = battery_capacity_path
         self._drm_root = drm_root
+        self._clock = clock
+        self._rescan_seconds = rescan_seconds
+        self._gpu_files: list[Path] = []
+        self._gpu_scanned_at = -math.inf
         self._disk_path = disk_path
         self._statvfs = statvfs
         self._previous_cpu_times: tuple[float, float] | None = None
@@ -105,11 +114,7 @@ class SystemMetricsProvider:
     def _read_gpu_percent(self) -> float | None:
         """Busiest awake GPU; a runtime-suspended GPU is skipped so polling never wakes it."""
         readings = []
-        try:
-            busy_files = sorted(self._drm_root.glob("card*/device/gpu_busy_percent"))
-        except OSError:
-            return None
-        for busy_file in busy_files:
+        for busy_file in self._gpu_busy_files():
             status_file = busy_file.parent / "power" / "runtime_status"
             try:
                 if status_file.read_text(encoding="utf-8").strip() == "suspended":
@@ -118,11 +123,25 @@ class SystemMetricsProvider:
                 pass
             try:
                 value = float(busy_file.read_text(encoding="utf-8").strip())
-            except (OSError, ValueError):
+            except OSError:
+                self._gpu_scanned_at = -math.inf  # gone: look for GPUs again next time
+                continue
+            except ValueError:
                 continue
             if math.isfinite(value) and 0 <= value <= 100:
                 readings.append(value)
         return max(readings) if readings else None
+
+    def _gpu_busy_files(self) -> list[Path]:
+        """GPU load files, found again every `rescan_seconds` (a glob costs more than a read)."""
+        now = self._clock()
+        if now - self._gpu_scanned_at >= self._rescan_seconds:
+            self._gpu_scanned_at = now
+            try:
+                self._gpu_files = sorted(self._drm_root.glob("card*/device/gpu_busy_percent"))
+            except OSError:
+                self._gpu_files = []
+        return self._gpu_files
 
     def _read_disk_used_percent(self) -> float | None:
         try:

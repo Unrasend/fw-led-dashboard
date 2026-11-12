@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import cmath
 import io
 import math
 import random
+import struct
 import time
 from itertools import pairwise
 from typing import Self
@@ -15,6 +17,7 @@ from framework_led_dashboard.audio import (
     WINDOW_SIZE,
     BandLayout,
     MicrophoneSpectrum,
+    RealPowerSpectrum,
     SpectrumAnalyzer,
     parec_command,
 )
@@ -137,6 +140,35 @@ def test_levels_decay_after_sound_stops() -> None:
 
     assert first == pytest.approx(0.5)
     assert second == pytest.approx(0.25)
+
+
+def test_real_power_spectrum_matches_a_plain_dft() -> None:
+    rng = random.Random(5)
+    samples = [rng.uniform(-1, 1) for _ in range(64)]
+    pairs = [complex(samples[n], samples[n + 1]) for n in range(0, 64, 2)]
+
+    powers = RealPowerSpectrum(64, 32).power(pairs)
+
+    expected = [
+        abs(sum(x * cmath.exp(-2j * math.pi * k * n / 64) for n, x in enumerate(samples))) ** 2
+        for k in range(32)
+    ]
+    assert powers == pytest.approx(expected, rel=1e-9, abs=1e-9)
+
+
+def test_pcm_input_gives_the_same_levels_as_float_samples() -> None:
+    signal = SignalBuilder().tone(440.0, 0.4).noise(0.05).build()
+    pcm = struct.pack(f"<{WINDOW_SIZE}h", *(round(sample * 32767) for sample in signal))
+    as_floats = [value / 32768 for value in struct.unpack(f"<{WINDOW_SIZE}h", pcm)]
+    from_pcm, from_floats = AnalyzerBuilder().build(), AnalyzerBuilder().build()
+
+    for _ in range(5):
+        assert from_pcm.analyze_pcm16(pcm) == pytest.approx(from_floats.analyze(as_floats))
+
+
+def test_analyzer_rejects_a_pcm_chunk_of_the_wrong_size() -> None:
+    with pytest.raises(ValueError, match="bytes"):
+        AnalyzerBuilder().build().analyze_pcm16(b"\x00" * 100)
 
 
 def test_analyzer_rejects_wrong_window_size() -> None:

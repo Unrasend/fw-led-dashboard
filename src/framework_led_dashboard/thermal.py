@@ -1,20 +1,51 @@
 from __future__ import annotations
 
 import math
+import time
+from collections.abc import Callable
 from pathlib import Path
+
+SENSOR_RESCAN_SECONDS = 60.0
 
 _CPU_LABELS = {"cpu", "cpu temp", "cpu@4c", "package id 0", "tctl"}
 _CPU_DRIVERS = {"coretemp", "k10temp"}
 
 
 class CpuTemperatureProvider:
-    """Read the best available CPU temperature from Linux hwmon."""
+    """Read the best available CPU temperature from Linux hwmon.
 
-    def __init__(self, *, hwmon_root: Path = Path("/sys/class/hwmon")) -> None:
+    Finding the sensor means walking every hwmon directory, so the choice is kept and only
+    its file is read; the search runs again every `rescan_seconds` or when that read fails.
+    """
+
+    def __init__(
+        self,
+        *,
+        hwmon_root: Path = Path("/sys/class/hwmon"),
+        clock: Callable[[], float] = time.monotonic,
+        rescan_seconds: float = SENSOR_RESCAN_SECONDS,
+    ) -> None:
         self._hwmon_root = hwmon_root
+        self._clock = clock
+        self._rescan_seconds = rescan_seconds
+        self._sensor: Path | None = None
+        self._scanned_at = -math.inf
 
     def read_celsius(self) -> float | None:
-        candidates: list[tuple[int, str, float]] = []
+        now = self._clock()
+        if now - self._scanned_at < self._rescan_seconds:
+            if self._sensor is None:
+                return None
+            temperature = _read_millidegrees(self._sensor)
+            if temperature is not None:
+                return temperature
+        self._scanned_at = now
+        found = self._find_sensor()
+        self._sensor = None if found is None else found[0]
+        return None if found is None else found[1]
+
+    def _find_sensor(self) -> tuple[Path, float] | None:
+        candidates: list[tuple[int, str, Path, float]] = []
         try:
             hwmon_directories = sorted(self._hwmon_root.glob("hwmon*"))
         except OSError:
@@ -35,11 +66,12 @@ class CpuTemperatureProvider:
 
                 temperature = _read_millidegrees(input_path)
                 if temperature is not None:
-                    candidates.append((priority, str(input_path), temperature))
+                    candidates.append((priority, str(input_path), input_path, temperature))
 
         if not candidates:
             return None
-        return min(candidates)[2]
+        _priority, _name, path, temperature = min(candidates)
+        return path, temperature
 
 
 def _sensor_priority(driver: str, label: str) -> int | None:

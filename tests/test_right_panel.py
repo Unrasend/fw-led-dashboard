@@ -279,3 +279,53 @@ def test_right_panel_keeps_negative_outside_temperature_glyphs_apart(
 
     rendered = tuple("".join("#" if pixel else "." for pixel in row) for row in frame[11:16])
     assert rendered == expected_rows
+
+
+class _ManualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_cpu_temperature_keeps_reading_the_sensor_it_found(tmp_path: Path) -> None:
+    _write_hwmon_sensor(tmp_path, "hwmon0", name="cros_ec", label="cpu@4c", value="54000")
+    clock = _ManualClock()
+    provider = CpuTemperatureProvider(hwmon_root=tmp_path, clock=clock, rescan_seconds=60)
+    assert provider.read_celsius() == pytest.approx(54)
+
+    # A better sensor appears, the chosen one changes value: no search within a minute...
+    _write_hwmon_sensor(tmp_path, "hwmon1", name="k10temp", label="Tctl", value="70000")
+    (tmp_path / "hwmon0" / "temp1_input").write_text("55000", encoding="utf-8")
+    clock.now = 59.0
+    assert provider.read_celsius() == pytest.approx(55)
+
+    # ...and the search after it picks the better one.
+    clock.now = 60.0
+    assert provider.read_celsius() == pytest.approx(70)
+
+
+def test_cpu_temperature_searches_again_when_its_sensor_disappears(tmp_path: Path) -> None:
+    _write_hwmon_sensor(tmp_path, "hwmon0", name="k10temp", label="Tctl", value="66000")
+    clock = _ManualClock()
+    provider = CpuTemperatureProvider(hwmon_root=tmp_path, clock=clock, rescan_seconds=60)
+    assert provider.read_celsius() == pytest.approx(66)
+
+    # hwmon numbers can change when a driver reloads.
+    (tmp_path / "hwmon0").rename(tmp_path / "hwmon3")
+    clock.now = 1.0
+
+    assert provider.read_celsius() == pytest.approx(66)
+
+
+def test_cpu_temperature_without_sensors_waits_before_searching_again(tmp_path: Path) -> None:
+    clock = _ManualClock()
+    provider = CpuTemperatureProvider(hwmon_root=tmp_path, clock=clock, rescan_seconds=60)
+    assert provider.read_celsius() is None
+
+    _write_hwmon_sensor(tmp_path, "hwmon0", name="k10temp", label="Tctl", value="50000")
+    clock.now = 30.0
+    assert provider.read_celsius() is None
+    clock.now = 60.0
+    assert provider.read_celsius() == pytest.approx(50)

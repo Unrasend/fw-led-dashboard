@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import cmath
 import math
 import subprocess
+import sys
 import threading
 import time
+from array import array
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -39,36 +42,64 @@ class BandLayout:
         return tuple(ranges)
 
 
-class HannWindow:
-    def __init__(self, size: int) -> None:
-        self._weights = [0.5 - 0.5 * math.cos(2 * math.pi * n / size) for n in range(size)]
-
-    def apply(self, samples: Sequence[float]) -> list[complex]:
-        return [complex(sample * weight) for sample, weight in zip(samples, self._weights)]
+def hann_weights(size: int) -> list[float]:
+    return [0.5 - 0.5 * math.cos(2 * math.pi * n / size) for n in range(size)]
 
 
 class RadixTwoFft:
+    """In-place iterative complex FFT with per-stage twiddle tables."""
+
     def __init__(self, size: int) -> None:
         if size < 2 or size & (size - 1):
             raise ValueError("fft size must be a power of two")
         self._size = size
-        self._twiddles = [complex(math.cos(-2 * math.pi * k / size), math.sin(-2 * math.pi * k / size)) for k in range(size // 2)]
         bits = size.bit_length() - 1
         self._order = [int(f"{index:0{bits}b}"[::-1], 2) for index in range(size)]
-
-    def power(self, values: Sequence[complex]) -> list[float]:
-        data = [values[index] for index in self._order]
-        span = 2
-        while span <= self._size:
+        self._stages: list[tuple[int, list[complex]]] = []
+        span = 4  # the first stage (span 2) only adds and subtracts
+        while span <= size:
             half = span // 2
-            step = self._size // span
-            for start in range(0, self._size, span):
-                for offset in range(half):
-                    twiddle = self._twiddles[offset * step] * data[start + offset + half]
-                    data[start + offset + half] = data[start + offset] - twiddle
-                    data[start + offset] += twiddle
+            twiddles = [cmath.exp(-2j * math.pi * offset / span) for offset in range(half)]
+            self._stages.append((span, twiddles))
             span *= 2
-        return [abs(value) ** 2 for value in data[: self._size // 2]]
+
+    def transform(self, values: Sequence[complex]) -> list[complex]:
+        data = [values[index] for index in self._order]
+        for start in range(0, self._size, 2):
+            first, second = data[start], data[start + 1]
+            data[start], data[start + 1] = first + second, first - second
+        for span, twiddles in self._stages:
+            half = span // 2
+            for start in range(0, self._size, span):
+                for offset, twiddle in enumerate(twiddles, start):
+                    product = twiddle * data[offset + half]
+                    data[offset + half] = data[offset] - product
+                    data[offset] += product
+        return data
+
+
+class RealPowerSpectrum:
+    """|X[k]|² for k < `bins` of `size` real samples.
+
+    The samples go in as size/2 complex pairs (x[2n] + i·x[2n+1]), so one FFT of half the
+    length does the work; only the bins the bands use are unpacked.
+    """
+
+    def __init__(self, size: int, bins: int) -> None:
+        if not 0 < bins <= size // 2:
+            raise ValueError(f"bins must be between 1 and {size // 2}")
+        self._fft = RadixTwoFft(size // 2)
+        self._rotations = [-0.5j * cmath.exp(-2j * math.pi * k / size) for k in range(bins)]
+
+    def power(self, pairs: Sequence[complex]) -> list[float]:
+        spectrum = self._fft.transform(pairs)
+        powers = []
+        for k, rotation in enumerate(self._rotations):
+            current = spectrum[k]
+            mirrored = spectrum[-k].conjugate()  # spectrum[size/2 - k], and spectrum[0] for k = 0
+            value = (current + mirrored) * 0.5 + rotation * (current - mirrored)
+            powers.append(value.real * value.real + value.imag * value.imag)
+        return powers
 
 
 class AdaptiveFloor:
@@ -107,8 +138,12 @@ class SpectrumAnalyzer:
         layout = BandLayout(sample_rate, window_size, low_hz, high_hz, BAND_COUNT)
         self._window_size = window_size
         self._ranges = layout.bin_ranges()
-        self._window = HannWindow(window_size)
-        self._fft = RadixTwoFft(window_size)
+        weights = hann_weights(window_size)
+        self._even_weights, self._odd_weights = weights[0::2], weights[1::2]
+        # parec delivers signed 16-bit samples: scale them while windowing.
+        self._even_pcm_weights = [weight / 32768 for weight in self._even_weights]
+        self._odd_pcm_weights = [weight / 32768 for weight in self._odd_weights]
+        self._spectrum = RealPowerSpectrum(window_size, max(stop for _, stop in self._ranges))
         self._dynamic_range_db = dynamic_range_db
         self._gate_db = gate_db
         self._attack = attack
@@ -122,9 +157,24 @@ class SpectrumAnalyzer:
         return self._window_size
 
     def analyze(self, samples: Sequence[float]) -> Levels:
+        """Levels for one window of samples in -1..1."""
         if len(samples) != self._window_size:
             raise ValueError(f"expected {self._window_size} samples, got {len(samples)}")
-        power = self._fft.power(self._window.apply(samples))
+        return self._levels_from(_windowed_pairs(samples, self._even_weights, self._odd_weights))
+
+    def analyze_pcm16(self, chunk: bytes) -> Levels:
+        """Levels for one window of signed 16-bit little-endian samples, as parec sends them."""
+        if len(chunk) != 2 * self._window_size:
+            raise ValueError(f"expected {2 * self._window_size} bytes, got {len(chunk)}")
+        samples = array("h", chunk)
+        if sys.byteorder == "big":
+            samples.byteswap()
+        return self._levels_from(
+            _windowed_pairs(samples, self._even_pcm_weights, self._odd_pcm_weights)
+        )
+
+    def _levels_from(self, pairs: list[complex]) -> Levels:
+        power = self._spectrum.power(pairs)
         for index, (start, stop) in enumerate(self._ranges):
             energy = sum(power[start:stop]) / (stop - start)
             value_db = 10 * math.log10(energy / self._full_scale + 1e-12)
@@ -134,6 +184,17 @@ class SpectrumAnalyzer:
             rate = self._attack if target > self._levels[index] else self._release
             self._levels[index] += rate * (target - self._levels[index])
         return tuple(self._levels)
+
+
+def _windowed_pairs(
+    samples: Sequence[float], even_weights: Sequence[float], odd_weights: Sequence[float]
+) -> list[complex]:
+    return [
+        complex(even * even_weight, odd * odd_weight)
+        for even, odd, even_weight, odd_weight in zip(
+            samples[0::2], samples[1::2], even_weights, odd_weights, strict=True
+        )
+    ]
 
 
 class CaptureProcess(Protocol):
@@ -238,8 +299,7 @@ class MicrophoneSpectrum:
                 chunk = stream.read(chunk_size)
                 if len(chunk) < chunk_size:
                     raise OSError("capture stream ended")
-                samples = [int.from_bytes(chunk[i : i + 2], "little", signed=True) / 32768 for i in range(0, chunk_size, 2)]
-                self._publish(self._analyzer.analyze(samples))
+                self._publish(self._analyzer.analyze_pcm16(chunk))
         finally:
             self._terminate()
 
