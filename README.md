@@ -86,7 +86,7 @@ tried — reports are welcome.
 ## Install
 
 ```bash
-git clone <this repository's URL> fw-led-dashboard
+git clone https://github.com/Unrasend/fw-led-dashboard.git
 ```
 
 ```bash

@@ -20,6 +20,10 @@ classifiers = [
 ]
 dependencies = ["pyserial>=3.5,<4"]
 
+[project.urls]
+Homepage = "https://github.com/Unrasend/fw-led-dashboard"
+Issues = "https://github.com/Unrasend/fw-led-dashboard/issues"
+
 [project.scripts]
 framework-led-dashboard = "framework_led_dashboard.__main__:main"
 
