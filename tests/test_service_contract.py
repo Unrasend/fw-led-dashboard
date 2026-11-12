@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import configparser
+import functools
+import http.server
+import io
+import os
 import subprocess
+import tarfile
+import threading
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -160,3 +167,107 @@ def test_first_install_detects_both_panels_into_a_new_config() -> None:
 
     assert '--init-config "$PROJECT_DIR/config.example.toml" "$CONFIG_DIR/config.toml"' in text
     assert '--check-config "$CONFIG_DIR/config.toml"' in text
+
+
+def test_install_script_downloads_the_release_of_the_package_version() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+
+    assert f"\nVERSION={project['project']['version']}\n" in text
+
+
+def test_install_script_runs_nothing_until_it_is_read_to_the_end() -> None:
+    # Piped from the web, bash executes lines as they arrive: a cut download must not
+    # run half a script, so everything sits in functions called from the last line.
+    lines = [line for line in INSTALL_SCRIPT.read_text(encoding="utf-8").splitlines() if line]
+
+    assert lines[-1] == 'main "$@"'
+    assert lines.count('main "$@"') == 1
+
+
+def _piped(
+    *args: str, home: Path, archive_url: str = "http://127.0.0.1:9/none"
+) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "HOME": str(home), "LED_DASHBOARD_ARCHIVE_URL": archive_url}
+    return subprocess.run(
+        ["bash", "-s", "--", *args],
+        input=INSTALL_SCRIPT.read_text(encoding="utf-8"),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=60,
+    )
+
+
+def test_piped_help_and_unknown_options_need_no_download(tmp_path: Path) -> None:
+    shown = _piped("--help", home=tmp_path)
+    assert shown.returncode == 0
+    assert "| bash -s -- --uninstall" in shown.stdout
+
+    rejected = _piped("--frobnicate", home=tmp_path)
+    assert rejected.returncode == 1
+    assert "unknown option" in rejected.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.fixture
+def release_server(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    served = tmp_path / "served"
+    served.mkdir()
+    handler = functools.partial(_QuietHandler, directory=str(served))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", served
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+def _stub_release(path: Path) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        for name, text in {
+            "install.sh": 'echo "stub install from $(dirname "$0") args=[$*]"\n',
+            "packaging/framework-led-dashboard.service": "[Unit]\n",
+        }.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"framework-led-dashboard-9.9.9/{name}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+
+
+def test_piped_install_unpacks_the_release_and_runs_its_installer(
+    tmp_path: Path, release_server: tuple[str, Path]
+) -> None:
+    base_url, served = release_server
+    _stub_release(served / "release.tar.gz")
+    home = tmp_path / "home"
+    src = home / ".local/share/framework-led-dashboard/src"
+    src.mkdir(parents=True)
+    (src / "left-over-from-an-older-release").touch()
+
+    result = _piped(home=home, archive_url=f"{base_url}/release.tar.gz")
+
+    assert result.returncode == 0, result.stderr
+    assert f"stub install from {src} args=[]" in result.stdout
+    assert sorted(path.name for path in src.iterdir()) == ["install.sh", "packaging"]
+    assert sorted(path.name for path in src.parent.iterdir()) == ["src"]  # no temp files
+
+
+def test_piped_install_stops_cleanly_when_the_release_cannot_be_downloaded(
+    tmp_path: Path, release_server: tuple[str, Path]
+) -> None:
+    base_url, _served = release_server
+
+    result = _piped(home=tmp_path, archive_url=f"{base_url}/missing.tar.gz")
+
+    assert result.returncode == 1
+    assert "could not download" in result.stderr
+    assert list((tmp_path / ".local/share/framework-led-dashboard").iterdir()) == []

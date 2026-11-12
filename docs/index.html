@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LED Matrix dashboard for the Framework Laptop 16</title>
+  <meta name="description" content="A Linux daemon that turns the two LED Matrix input modules of a Framework Laptop 16 into a live dashboard: battery, CPU and RAM bars, weather, temperatures and a microphone equalizer.">
+  <meta property="og:title" content="LED Matrix dashboard for the Framework Laptop 16">
+  <meta property="og:description" content="Battery, CPU and RAM bars, weather, temperatures and a microphone equalizer on the two 9×34 LED Matrix modules. One-line install, GTK tray, systemd user service.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://unrasend.github.io/fw-led-dashboard/">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./"><span class="brand-mark" aria-hidden="true"></span>fw-led-dashboard</a>
+    <nav aria-label="Page">
+      <a href="#install">Install</a>
+      <a href="#weather">Weather icons</a>
+      <a href="https://github.com/Unrasend/fw-led-dashboard">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="intro">
+        <p class="eyebrow">Framework Laptop 16 · Linux</p>
+        <h1>Your LED Matrix modules, as a system dashboard</h1>
+        <p class="lead">
+          A small daemon for the two 9×34 LED Matrix input modules: bars for battery, CPU and
+          RAM, the weather outside, CPU temperature, and an equalizer that follows your
+          microphone. A GTK tray icon switches it on and off, sets the brightness and picks
+          what the bars show.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="#install">Install</a>
+          <a class="button" href="https://github.com/Unrasend/fw-led-dashboard">Source on GitHub</a>
+        </div>
+        <ul class="facts">
+          <li>Only the critical value blinks: battery ≤ 10 %, RAM nearly full, CPU at 120 °C</li>
+          <li>Weather from Open-Meteo, no account or API key</li>
+          <li>Survives suspend, USB reconnects and network loss</li>
+          <li>About 5 % of one core and 20 MB of memory</li>
+        </ul>
+      </div>
+
+      <figure class="stage">
+        <div class="panels">
+          <div class="panel-side left">
+            <ul class="callouts" aria-hidden="true">
+              <li style="--row: 10">battery · CPU · RAM</li>
+              <li style="--row: 28">microphone<br>equalizer</li>
+            </ul>
+            <canvas id="panel-left" class="module" role="img"
+              aria-label="Left panel: three bars for battery, CPU and RAM above the equalizer"></canvas>
+          </div>
+          <div class="panel-side right">
+            <canvas id="panel-right" class="module" role="img"
+              aria-label="Right panel: weather icon, outside temperature, CPU temperature and the equalizer"></canvas>
+            <ul class="callouts" aria-hidden="true">
+              <li style="--row: 4.5">weather,<br>animated</li>
+              <li style="--row: 13">outside °</li>
+              <li style="--row: 19">CPU °C</li>
+              <li style="--row: 28">equalizer,<br>mirrored</li>
+            </ul>
+          </div>
+        </div>
+        <figcaption>
+          <span>Simulated with the dashboard's own renderers; the equalizer plays a made-up
+            song. Weather: <strong id="weather-now">–</strong>.</span>
+          <button id="play" class="chip" type="button" aria-pressed="true">Pause</button>
+        </figcaption>
+        <noscript><p class="noscript">The live panels need JavaScript; the
+          <a href="https://github.com/Unrasend/fw-led-dashboard#readme">README</a> has a still preview.</p></noscript>
+      </figure>
+    </section>
+
+    <section id="install" class="band">
+      <h2>Install</h2>
+      <p>One line, as your normal user — no <code>sudo</code>:</p>
+      <div class="command">
+        <code id="install-command">wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash</code>
+        <button class="chip" type="button" data-copy="install-command">Copy</button>
+      </div>
+      <p class="muted">
+        It downloads release 1.0.0 into <code>~/.local/share/framework-led-dashboard</code>,
+        detects both panels, writes <code>~/.config/framework-led-dashboard/config.toml</code>,
+        starts the <code>framework-led-dashboard</code> systemd user service and adds the tray
+        icon to your session. Run the same line again to update.
+      </p>
+
+      <div class="columns">
+        <div>
+          <h3>Before you run it</h3>
+          <p>Python 3.11+ with pyserial, PyGObject and pycairo from your distribution, plus
+            <code>parec</code> (PipeWire or PulseAudio) for the equalizer. The
+            <a href="https://github.com/Unrasend/fw-led-dashboard#requirements">README</a> lists the
+            package names for Arch, Debian/Ubuntu and Fedora.</p>
+        </div>
+        <div>
+          <h3>Read it first</h3>
+          <p>Piping a script into bash deserves a look:
+            <a href="https://github.com/Unrasend/fw-led-dashboard/blob/main/install.sh">install.sh</a>
+            touches only your home directory and never needs root.</p>
+        </div>
+        <div>
+          <h3>By hand</h3>
+          <p>Get <a href="https://github.com/Unrasend/fw-led-dashboard/releases/download/v1.0.0/framework-led-dashboard-1.0.0.tar.gz">framework-led-dashboard-1.0.0.tar.gz</a>
+            or <code>git clone</code> the repository, then run <code>./install.sh</code> inside.</p>
+        </div>
+      </div>
+
+      <p class="muted">Remove it again (keeps your config and tray settings):</p>
+      <div class="command">
+        <code id="uninstall-command">wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash -s -- --uninstall</code>
+        <button class="chip" type="button" data-copy="uninstall-command">Copy</button>
+      </div>
+    </section>
+
+    <section id="weather">
+      <h2>Every weather icon</h2>
+      <p class="muted">
+        All 28 Open-Meteo weather codes, by day and by night: 9×10 pixels, 20 frames at 2 frames
+        a second, drawn here by the same code as on the panel. Pick one to put it on the right
+        panel above.
+      </p>
+      <div id="gallery" class="gallery"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      <a href="https://github.com/Unrasend/fw-led-dashboard">github.com/Unrasend/fw-led-dashboard</a>
+      · MIT license · <a href="https://github.com/Unrasend/fw-led-dashboard/releases">Releases</a>
+    </p>
+    <p class="muted">A community project, not affiliated with Framework Computer Inc.</p>
+  </footer>
+</body>
+</html>

@@ -4,6 +4,12 @@ A small Linux daemon that turns the two 9×34 **LED Matrix input modules** of a
 [Framework Laptop 16](https://frame.work/laptop16) into a live system dashboard, with a GTK tray
 icon for brightness, on/off and what the bars show.
 
+**[Live demo of both panels and every weather icon →](https://unrasend.github.io/fw-led-dashboard/)**
+
+```bash
+wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
+```
+
 ```
      left panel                right panel
 ┌──────────────────┐    ┌──────────────────┐
@@ -85,6 +91,22 @@ tried — reports are welcome.
 
 ## Install
 
+Install the packages above, then, as your normal user (no `sudo`):
+
+```bash
+wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
+```
+
+This downloads the latest release into `~/.local/share/framework-led-dashboard/src` and runs
+its `install.sh`. With `curl` instead of `wget`:
+
+```bash
+curl -fsSL https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
+```
+
+Prefer to read the script before running it, or to work from a checkout? Download it, or
+clone the repository — `install.sh` does the same from there:
+
 ```bash
 git clone https://github.com/Unrasend/fw-led-dashboard.git
 ```
@@ -93,10 +115,10 @@ git clone https://github.com/Unrasend/fw-led-dashboard.git
 cd fw-led-dashboard && ./install.sh
 ```
 
-The installer, run as your user (no `sudo`):
+The installer:
 
 1. creates a venv in `~/.local/share/framework-led-dashboard/venv` that reuses the system
-   packages above (nothing is downloaded) and installs the dashboard into it;
+   packages above (no Python packages are downloaded) and installs the dashboard into it;
 2. detects both panels and writes `~/.config/framework-led-dashboard/config.toml` — only if
    it does not exist yet;
 3. installs, enables and starts the `framework-led-dashboard` systemd user service;
@@ -107,8 +129,15 @@ The installer, run as your user (no `sudo`):
 **Bars on the right and weather on the left?** Set `swap_panels = true` in the config and
 restart the service (see below).
 
-**Update:** `git pull` and run `./install.sh` again. **Remove:** `./install.sh --uninstall`
-(stops and removes the service, tray entry and venv; keeps your config and tray settings).
+**Update:** run the same `wget … | bash` line again (or `git pull` and `./install.sh` in a
+checkout). **Remove** — stops and removes the service, tray entry, venv and downloaded source;
+keeps your config and tray settings:
+
+```bash
+wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash -s -- --uninstall
+```
+
+or `./install.sh --uninstall` in a checkout.
 
 ## Using it
 
@@ -217,7 +246,12 @@ PYTHONPATH=src python3 -m framework_led_dashboard --run ~/.config/framework-led-
 Stop the service before running from the checkout — only one dashboard can own the panels.
 Layout: `src/framework_led_dashboard/` (daemon, renderers, transport, tray), `tests/`
 (including golden frames in `tests/goldens/`), `packaging/` (systemd unit, tray autostart
-entry) and `install.sh`.
+entry), `install.sh`, and `docs/` — the GitHub Pages demo. Its frames come from the real
+renderers; after changing one, regenerate them (a test fails until you do):
+
+```bash
+PYTHONPATH=src python3 scripts/build_demo_data.py
+```
 
 ## License
 
