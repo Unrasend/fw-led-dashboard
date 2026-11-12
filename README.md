@@ -22,8 +22,9 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 - **Alerts:** only the critical value blinks, at 1 Hz, with hysteresis — battery ≤ 10 %,
   less than 5 % RAM free for 10 s, CPU at 120 °C. CPU-usage and outside-temperature limits are
   optional.
-- **Tray icon (GTK 3):** on/off switch, brightness slider and a submenu per bar; every data
-  source has a tooltip saying where its numbers come from. Choices survive restarts.
+- **Tray icon (GTK 3):** on/off switch, brightness slider, *Swap panels* switch and a submenu
+  per bar; every data source has a tooltip saying where its numbers come from. Choices survive
+  restarts.
 - **Runs unattended:** systemd user service; recovers from suspend/resume, USB reconnects,
   PipeWire restarts and network loss (the last weather reading is shown for up to 2 h).
 - **Light:** about 6 frames per second per panel (the firmware's grayscale limit) at ~5 % of
@@ -86,8 +87,8 @@ The installer:
 5. disables the older `inputmodule-rs` audio visualizer service (`framework-matrix.service`) if
    you have it — only one program can own the panels; it is not deleted.
 
-**Bars on the right and weather on the left?** Set `swap_panels = true` in the config and
-restart the service (see below).
+**Bars on the right and weather on the left?** Turn on *Swap panels* in the tray menu; the
+panels swap at once and the choice is kept.
 
 **Update:** run the same `wget … | bash` line again (or `git pull` and `./install.sh` in a
 checkout). **Remove** — stops and removes the service, tray entry, venv and downloaded source;
@@ -103,8 +104,9 @@ or `./install.sh --uninstall` in a checkout.
 
 **Tray icon** (amber when on, grey when off, red dot when the dashboard is not running):
 left click opens the menu — the *LED Matrix* switch, the *Brightness* slider (drag, click or
-scroll) and *Left panel bars* with one submenu per bar. Right click offers *Quit tray*; quitting
-the tray never touches the panels. Brightness, on/off and the bar choice are stored in
+scroll), the *Swap panels* switch (bars on the right, weather on the left) and *Left panel bars*
+with one submenu per bar. Right click offers *Quit tray*; quitting the tray never touches the
+panels. Brightness, on/off, the swap and the bar choice are stored in
 `~/.local/state/framework-led-dashboard/display.json`.
 
 **Service:**
@@ -143,7 +145,7 @@ Restart the service after editing it.
 |---|---|---|
 | `brightness_percent` | `40` | starting brightness; the tray overrides it |
 | `animation_fps` | `10` | frame-rate cap per panel (the hardware tops out near 7) |
-| `swap_panels` | `false` | exchange what the two panels show |
+| `swap_panels` | `false` | starting value of the tray's *Swap panels* switch; the tray overrides it |
 | `panels.left.identity`, `panels.right.identity` | detected | USB serial or location from `--list-panels` |
 | `location.latitude`, `location.longitude` | unset | fixed coordinates for the weather; skips geolocation |
 | `location.ip_lookup_enabled` | `true` | allow IP geolocation via ipwho.is |
@@ -163,7 +165,7 @@ cached location, then the city of the system time zone. Weather requests send on
 |---|---|
 | Panels stay dark | `journalctl --user -u framework-led-dashboard`; another program (e.g. an `inputmodule-control` visualizer) may hold the serial ports |
 | `Permission denied` on `/dev/ttyACM*` | the `uaccess` / group notes under Requirements |
-| Sides swapped | `swap_panels = true`, then restart |
+| Sides swapped | *Swap panels* in the tray menu |
 | Equalizer stays dark | `parec` installed? The log says `microphone unavailable` when there is no capture |
 | Weather shows `--` | no network for over 2 h, or no location — set `latitude`/`longitude` |
 | No tray icon | needs GTK 3 and an X11 tray with classic icons; the daemon keeps working without it |

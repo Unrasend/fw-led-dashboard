@@ -134,7 +134,7 @@ def _init_config(template: Path, target: Path, *, panel_lister: PanelLister) -> 
         )
         return 2
     # On the Framework 16 this was calibrated on, the module on the higher hub port is the
-    # left one; swap_panels fixes it if another unit differs.
+    # left one; the tray's "Swap panels" switch fixes it if another unit differs.
     left, right = identities
     try:
         filled = fill_panel_identities(template.read_text(encoding="utf-8"), left=left, right=right)
@@ -144,7 +144,7 @@ def _init_config(template: Path, target: Path, *, panel_lister: PanelLister) -> 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(filled, encoding="utf-8")
     print(f"wrote {target}: left panel {left}, right panel {right}")
-    print("If the bars appear on the right panel, set swap_panels = true and restart the service.")
+    print('If the bars appear on the right panel, turn on "Swap panels" in the tray menu.')
     return 0
 
 

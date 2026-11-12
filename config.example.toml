@@ -2,6 +2,8 @@
 brightness_percent = 40
 # Frame-rate cap per panel; grayscale output tops out near 7 FPS in the panel firmware.
 animation_fps = 10
+# Bars on the right panel, weather on the left. Only the starting value: the tray's
+# "Swap panels" switch changes it live and remembers its choice.
 swap_panels = false
 
 # USB identities from `framework-led-dashboard --list-panels`; the installer fills them in.

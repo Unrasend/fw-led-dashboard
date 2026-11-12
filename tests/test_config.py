@@ -224,7 +224,7 @@ def test_cli_init_config_writes_detected_panels(
     # On the Framework 16 this was calibrated on, the higher hub port is the left module.
     assert config.panels.left.identity == "1-4.2:1.0"
     assert config.panels.right.identity == "1-3.3:1.0"
-    assert "swap_panels" in capsys.readouterr().out
+    assert "Swap panels" in capsys.readouterr().out
 
 
 def test_cli_init_config_never_overwrites_an_existing_config(

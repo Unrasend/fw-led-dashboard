@@ -2,8 +2,9 @@
 
 Protocol: one JSON object per line, one request per connection.
   {"command": "status"}
-  {"command": "set", "brightness_percent": 60, "enabled": false}   (either field optional)
-Answer: {"ok": true, "brightness_percent": 60, "enabled": false} or {"ok": false, "error": "..."}.
+  {"command": "set", "brightness_percent": 60, "enabled": false}   (every field optional)
+Settable fields: brightness_percent, enabled, bars (3 source names), swap_panels.
+Answer: {"ok": true, <every field>} or {"ok": false, "error": "..."}.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ SOCKET_NAME = "framework-led-dashboard.sock"
 CONNECTION_TIMEOUT_SECONDS = 1.0
 
 
+SETTABLE_FIELDS = frozenset({"brightness_percent", "enabled", "bars", "swap_panels"})
+
+
 class ControlError(OSError):
     """Raised when the dashboard control socket cannot be used."""
 
@@ -34,6 +38,7 @@ class DisplaySettings:
     brightness_percent: int
     enabled: bool = True
     bars: tuple[str, ...] = DEFAULT_BARS
+    swap_panels: bool = False  # bars on the right panel, weather on the left
 
     def __post_init__(self) -> None:
         brightness = self.brightness_percent
@@ -46,6 +51,13 @@ class DisplaySettings:
         if not isinstance(self.bars, tuple) or not all(isinstance(key, str) for key in self.bars):
             raise TypeError("bars must be a tuple of source names")
         validate_bars(self.bars)
+        if not isinstance(self.swap_panels, bool):
+            raise TypeError("swap_panels must be true or false")
+
+
+def bars_side(settings: DisplaySettings) -> str:
+    """The panel that shows the bars: "left", or "right" when the panels are swapped."""
+    return "right" if settings.swap_panels else "left"
 
 
 def default_socket_path() -> Path:
@@ -82,9 +94,10 @@ class SettingsStore:
         path: Path,
         *,
         default_brightness_percent: int,
+        default_swap_panels: bool = False,
         logger: logging.Logger = LOGGER,
     ) -> SettingsStore:
-        settings = DisplaySettings(default_brightness_percent)
+        settings = DisplaySettings(default_brightness_percent, swap_panels=default_swap_panels)
         try:
             body = path.read_bytes()
             if len(body) > MAX_MESSAGE_BYTES:
@@ -93,7 +106,11 @@ class SettingsStore:
             if not isinstance(raw, dict):
                 raise TypeError("expected a JSON object")
             settings = DisplaySettings(
-                raw["brightness_percent"], raw["enabled"], _bars_from_json(raw.get("bars"))
+                raw["brightness_percent"],
+                raw["enabled"],
+                _bars_from_json(raw.get("bars")),
+                # Saved before the tray could swap panels: the config still decides.
+                raw.get("swap_panels", default_swap_panels),
             )
         except FileNotFoundError:
             pass
@@ -111,6 +128,7 @@ class SettingsStore:
         brightness_percent: int | None = None,
         enabled: bool | None = None,
         bars: tuple[str, ...] | None = None,
+        swap_panels: bool | None = None,
     ) -> DisplaySettings:
         changes: dict[str, object] = {}
         if brightness_percent is not None:
@@ -119,6 +137,8 @@ class SettingsStore:
             changes["enabled"] = enabled
         if bars is not None:
             changes["bars"] = bars
+        if swap_panels is not None:
+            changes["swap_panels"] = swap_panels
         with self._lock:
             previous = self._settings
             updated = replace(previous, **changes)
@@ -131,7 +151,9 @@ class SettingsStore:
         if updated.brightness_percent != previous.brightness_percent:
             self._logger.debug("display brightness %d%%", updated.brightness_percent)
         if updated.bars != previous.bars:
-            self._logger.info("left panel bars: %s", ", ".join(updated.bars))
+            self._logger.info("bars: %s", ", ".join(updated.bars))
+        if updated.swap_panels != previous.swap_panels:
+            self._logger.info("bars on the %s panel", bars_side(updated))
         return updated
 
     def _save(self, settings: DisplaySettings) -> None:
@@ -154,7 +176,7 @@ def handle_request(store: SettingsStore, request: object) -> dict[str, object]:
         if command == "status":
             settings = store.current()
         elif command == "set":
-            unknown = set(request) - {"command", "brightness_percent", "enabled", "bars"}
+            unknown = set(request) - {"command", *SETTABLE_FIELDS}
             if unknown:
                 return _error(f"unknown fields: {', '.join(sorted(unknown))}")
             bars = request.get("bars")
@@ -162,6 +184,7 @@ def handle_request(store: SettingsStore, request: object) -> dict[str, object]:
                 brightness_percent=request.get("brightness_percent"),
                 enabled=request.get("enabled"),
                 bars=None if bars is None else _bars_from_json(bars),
+                swap_panels=request.get("swap_panels"),
             )
         else:
             return _error("command must be 'status' or 'set'")
@@ -252,6 +275,7 @@ class ControlClient:
         brightness_percent: int | None = None,
         enabled: bool | None = None,
         bars: Sequence[str] | None = None,
+        swap_panels: bool | None = None,
     ) -> DisplaySettings:
         request: dict[str, object] = {"command": "set"}
         if brightness_percent is not None:
@@ -260,6 +284,8 @@ class ControlClient:
             request["enabled"] = enabled
         if bars is not None:
             request["bars"] = list(bars)
+        if swap_panels is not None:
+            request["swap_panels"] = swap_panels
         return self._request(request)
 
     def _request(self, request: dict[str, object]) -> DisplaySettings:
@@ -283,6 +309,7 @@ class ControlClient:
                 response["brightness_percent"],
                 response["enabled"],
                 _bars_from_json(response["bars"]),
+                response["swap_panels"],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ControlError(f"invalid answer from dashboard: {error}") from error

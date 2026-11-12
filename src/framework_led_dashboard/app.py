@@ -22,6 +22,7 @@ from .control import (
     ControlServer,
     DisplaySettings,
     SettingsStore,
+    bars_side,
     default_settings_path,
     default_socket_path,
 )
@@ -103,16 +104,37 @@ class DashboardState:
 
 
 def panel_targets(config: DashboardConfig) -> dict[str, str]:
-    """Map rendered content ("left"/"right") to the USB identity of the panel that shows it."""
+    """USB identity of the physical left and right panel.
+
+    Which content each one shows is a live setting (DisplaySettings.swap_panels, which starts
+    from config.swap_panels), applied by side_renderer.
+    """
     left = config.panels.left.identity
     right = config.panels.right.identity
     if left is None or right is None:
         raise ConfigError(
             "configure panels.left.identity and panels.right.identity (see --list-panels)"
         )
-    if config.swap_panels:
-        left, right = right, left
     return {"left": left, "right": right}
+
+
+def side_renderer(
+    side: str,
+    *,
+    settings: Callable[[], DisplaySettings],
+    left: Callable[[float], FramePixels],
+    right: Callable[[float], FramePixels],
+) -> Callable[[float], FramePixels]:
+    """Render for the physical panel on `side`: its own content, or the other side's while
+    the panels are swapped. The check runs every frame, so a swap shows at once."""
+    if side not in ("left", "right"):
+        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
+
+    def render(now: float) -> FramePixels:
+        shows_bars = (side == "left") != settings().swap_panels
+        return left(now) if shows_bars else right(now)
+
+    return render
 
 
 def render_left(
@@ -415,7 +437,9 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
     """Wire the real providers; raises ControlError if another dashboard already runs."""
     targets = panel_targets(config)
     store = SettingsStore.load(
-        default_settings_path(), default_brightness_percent=config.brightness_percent
+        default_settings_path(),
+        default_brightness_percent=config.brightness_percent,
+        default_swap_panels=config.swap_panels,
     )
     control = ControlServer(store, path=default_socket_path())
     control.open()
@@ -432,7 +456,8 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         return render_right(state.snapshot(), microphone.levels(), now - started)
 
     panels = []
-    for side, render in (("left", live_left), ("right", live_right)):
+    for side in ("left", "right"):
+        render = side_renderer(side, settings=store.current, left=live_left, right=live_right)
         transport = MatrixTransport(
             identity=targets[side],
             path_resolver=resolve_device_path,
@@ -474,9 +499,10 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
     )
     settings = store.current()
     LOGGER.info(
-        "display: brightness %d%%, %s, left panel bars: %s",
+        "display: brightness %d%%, %s, bars on the %s panel: %s",
         settings.brightness_percent,
         "on" if settings.enabled else "off",
+        bars_side(settings),
         ", ".join(settings.bars),
     )
     return Dashboard(

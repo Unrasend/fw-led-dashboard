@@ -1,8 +1,9 @@
 """System tray control for the running dashboard (GTK 3).
 
 Left click opens a native GTK menu styled by the desktop theme, like the XFCE PulseAudio
-plugin's popup: an On/Off switch, a brightness slider and one submenu per left-panel bar to
-choose its data source (each source has a tooltip saying where the data comes from).
+plugin's popup: an On/Off switch, a brightness slider, a switch that swaps what the two panels
+show, and one submenu per bar to choose its data source (each source has a tooltip saying
+where the data comes from).
 Right click offers Quit. The tray only talks to the dashboard through its control socket, so
 quitting the tray never touches the panels.
 """
@@ -22,7 +23,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 from .bar_sources import BAR_COUNT, BAR_SOURCES
-from .control import ControlClient, ControlError, DisplaySettings
+from .control import ControlClient, ControlError, DisplaySettings, bars_side
 
 # Gtk.StatusIcon is deprecated, but it is the GTK 3 icon that reports clicks and its position;
 # XFCE's tray still shows it (XEmbed).
@@ -33,9 +34,13 @@ SEND_DELAY_MS = 120
 SCROLL_STEP_PERCENT = 5
 BAR_SLOT_NAMES = ("Bar 1 (left)", "Bar 2 (middle)", "Bar 3 (right)")
 BAR_SLOT_HINTS = (
-    "Columns 0–1 of the left panel; 21 LEDs high = 100%.",
-    "Columns 3–5 of the left panel; 21 LEDs high = 100%.",
-    "Columns 7–8 of the left panel; 21 LEDs high = 100%.",
+    "Columns 0–1 of the {side} panel; 21 LEDs high = 100%.",
+    "Columns 3–5 of the {side} panel; 21 LEDs high = 100%.",
+    "Columns 7–8 of the {side} panel; 21 LEDs high = 100%.",
+)
+SWAP_HINT = (
+    "Show the bars on the right panel and the weather on the left.\n"
+    "Also puts things right if the panels were detected the wrong way round."
 )
 ICON_BAR_HEIGHTS = (3, 6, 4)
 ICON_DOT_ROWS = 7
@@ -78,11 +83,12 @@ def _rounded_rectangle(
 class SwitchMenuItem(Gtk.MenuItem):
     """Title with a switch on the right; clicking toggles it and keeps the menu open."""
 
-    def __init__(self, title: str) -> None:
+    def __init__(self, title: str, *, bold: bool = True) -> None:
         super().__init__()
         self.switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         label = Gtk.Label(xalign=0)
-        label.set_markup(f"<b>{GLib.markup_escape_text(title)}</b>")
+        escaped = GLib.markup_escape_text(title)
+        label.set_markup(f"<b>{escaped}</b>" if bold else escaped)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         box.pack_start(label, True, True, 0)
         box.pack_end(self.switch, False, False, 0)
@@ -188,13 +194,14 @@ class BarMenuItem(Gtk.MenuItem):
             self._radios[key] = radio
         self.set_submenu(submenu)
 
-    def show_source(self, key: str) -> None:
+    def show_source(self, key: str, *, side: str) -> None:
         self._updating = True
         self._radios[key].set_active(True)
         self._updating = False
         source = BAR_SOURCES[key]
         self.set_label(f"{BAR_SLOT_NAMES[self.slot]}: {source.label}")
-        self.set_tooltip_text(f"{BAR_SLOT_HINTS[self.slot]}\n\n{source.hint}")
+        hint = BAR_SLOT_HINTS[self.slot].format(side=side)
+        self.set_tooltip_text(f"{hint}\n\n{source.hint}")
 
     def _toggled(self, radio: Gtk.RadioMenuItem, key: str) -> None:
         if radio.get_active() and not self._updating:
@@ -222,9 +229,12 @@ class TrayController:
         self._power.switch.connect("notify::active", self._on_power_switched)
         self._brightness = ScaleMenuItem("display-brightness-symbolic", "Brightness")
         self._brightness.scale.connect("value-changed", self._on_brightness_moved)
-        bars_title = Gtk.MenuItem(label="Left panel bars")
-        bars_title.set_sensitive(False)
-        bars_title.set_tooltip_text(
+        self._swap = SwitchMenuItem("Swap panels", bold=False)
+        self._swap.set_tooltip_text(SWAP_HINT)
+        self._swap.switch.connect("notify::active", self._on_swap_switched)
+        self._bars_title = Gtk.MenuItem(label="Left panel bars")
+        self._bars_title.set_sensitive(False)
+        self._bars_title.set_tooltip_text(
             "What each bar shows. Hover a source to see where its data comes from."
         )
         self._bars = [BarMenuItem(slot, self._on_bar_chosen) for slot in range(BAR_COUNT)]
@@ -232,8 +242,9 @@ class TrayController:
             self._unreachable,
             self._power,
             self._brightness,
+            self._swap,
             Gtk.SeparatorMenuItem(),
-            bars_title,
+            self._bars_title,
             *self._bars,
         ):
             self._menu.append(item)
@@ -288,7 +299,7 @@ class TrayController:
         self._settings = settings
         reachable = settings is not None
         self._unreachable.set_visible(not reachable)
-        for item in (self._power, self._brightness, *self._bars):
+        for item in (self._power, self._brightness, self._swap, *self._bars):
             item.set_sensitive(reachable)
         if settings is None:
             self._set_icon("unreachable", "LED Matrix: dashboard is not running")
@@ -296,15 +307,19 @@ class TrayController:
         self._updating = True
         self._power.switch.set_active(settings.enabled)
         self._brightness.scale.set_value(max(1, settings.brightness_percent))
+        self._swap.switch.set_active(settings.swap_panels)
         self._updating = False
         self._brightness.value_label.set_text(f"{settings.brightness_percent}%")
+        side = bars_side(settings)
+        self._bars_title.set_label(f"{side.capitalize()} panel bars")
         for item, key in zip(self._bars, settings.bars, strict=True):
-            item.show_source(key)
+            item.show_source(key, side=side)
         state = "on" if settings.enabled else "off"
         sources = ", ".join(BAR_SOURCES[key].label for key in settings.bars)
         self._set_icon(
             state,
-            f"LED Matrix: {state}, brightness {settings.brightness_percent}%\nBars: {sources}",
+            f"LED Matrix: {state}, brightness {settings.brightness_percent}%\n"
+            f"Bars on the {side} panel: {sources}",
         )
 
     def _set_icon(self, state: str, tooltip: str) -> None:
@@ -321,6 +336,10 @@ class TrayController:
     def _on_power_switched(self, switch: Gtk.Switch, _property: object) -> None:
         if not self._updating:
             self._apply(enabled=switch.get_active())
+
+    def _on_swap_switched(self, switch: Gtk.Switch, _property: object) -> None:
+        if not self._updating:
+            self._apply(swap_panels=switch.get_active())
 
     def _on_brightness_moved(self, scale: Gtk.Scale) -> None:
         if self._updating:

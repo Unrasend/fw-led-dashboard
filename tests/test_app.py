@@ -27,6 +27,7 @@ from framework_led_dashboard.app import (
     render_left,
     render_right,
     run_dashboard,
+    side_renderer,
 )
 from framework_led_dashboard.config import AlertsConfig, ConfigError, DashboardConfig, parse_config
 from framework_led_dashboard.control import ControlError, DisplaySettings
@@ -151,12 +152,43 @@ def test_panel_targets_send_each_side_to_its_configured_identity() -> None:
     assert panel_targets(CONFIGURED) == {"left": "L", "right": "R"}
 
 
-def test_swap_panels_sends_left_content_to_the_right_identity() -> None:
+def test_panel_targets_stay_physical_when_the_config_swaps_panels() -> None:
+    # The configured swap is only the starting value of the live setting (side_renderer).
     swapped = parse_config(
         {"swap_panels": True, "panels": {"left": {"identity": "L"}, "right": {"identity": "R"}}}
     )
 
-    assert panel_targets(swapped) == {"left": "R", "right": "L"}
+    assert panel_targets(swapped) == {"left": "L", "right": "R"}
+
+
+def test_side_renderer_swaps_content_as_soon_as_the_setting_changes() -> None:
+    current = {"settings": DisplaySettings(40)}
+    bars_frame = ((1,),)
+    weather_frame = ((2,),)
+    renderers = {
+        side: side_renderer(
+            side,
+            settings=lambda: current["settings"],
+            left=lambda _now: bars_frame,
+            right=lambda _now: weather_frame,
+        )
+        for side in ("left", "right")
+    }
+
+    assert renderers["left"](0.0) == bars_frame
+    assert renderers["right"](0.0) == weather_frame
+
+    current["settings"] = DisplaySettings(40, swap_panels=True)
+
+    assert renderers["left"](0.1) == weather_frame
+    assert renderers["right"](0.1) == bars_frame
+
+
+def test_side_renderer_rejects_an_unknown_side() -> None:
+    with pytest.raises(ValueError, match="side"):
+        side_renderer(
+            "middle", settings=lambda: DisplaySettings(40), left=lambda _n: (), right=lambda _n: ()
+        )
 
 
 def test_panel_targets_require_both_identities() -> None:
