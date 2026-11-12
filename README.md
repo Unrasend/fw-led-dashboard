@@ -4,54 +4,14 @@ A small Linux daemon that turns the two 9×34 **LED Matrix input modules** of a
 [Framework Laptop 16](https://frame.work/laptop16) into a live system dashboard, with a GTK tray
 icon for brightness, on/off and what the bars show.
 
-**[Live demo of both panels and every weather icon →](https://unrasend.github.io/fw-led-dashboard/)**
+[![Both LED Matrix panels running the dashboard: battery, CPU and RAM bars, an animated weather icon, outside and CPU temperature, and a microphone equalizer mirrored across both panels](docs/preview.gif)](https://unrasend.github.io/fw-led-dashboard/)
+
+*Drawn by the dashboard's own renderers; the equalizer plays a made-up song.*
+**[Live demo with every weather icon →](https://unrasend.github.io/fw-led-dashboard/)**
 
 ```bash
 wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
 ```
-
-```
-     left panel                right panel
-┌──────────────────┐    ┌──────────────────┐
-│                  │    │        ▒▒        │   ← animated weather icon
-│                  │    │        ██        │     (16 kinds, day and night)
-│                  │    │                  │
-│                  │    │      ██████      │
-│                  │    │▒▒██  ██████  ██▒▒│
-│████              │    │      ██████      │
-│████              │    │                  │
-│████              │    │        ██        │
-│████          ████│    │        ▒▒        │
-│████          ████│    │                  │
-│████          ████│    │                  │
-│████          ████│    │████████████    ██│   ← outside temperature, °
-│████          ████│    │    ████  ██      │
-│████          ████│    │████████████      │
-│████  ██████  ████│    │██        ██      │
-│████  ██████  ████│    │████████████      │
-│████  ██████  ████│    │                  │
-│████  ██████  ████│    │  ██  ████████████│   ← CPU temperature, °C
-│████  ██████  ████│    │████  ██  ████    │
-│████  ██████  ████│    │  ██  ██  ████████│
-│████  ██████  ████│    │  ██  ██  ██    ██│
-│██████████████████│    │██████████████████│
-│                  │    │                  │
-│                  │    │                  │
-│                  │    │                  │
-│                  │    │                  │
-│                  │    │                  │
-│            ██    │    │    ██            │   ← microphone equalizer,
-│            ▒▒    │    │    ▒▒            │     mirrored across both panels
-│        ████▒▒    │    │    ▒▒████        │
-│      ██▒▒▒▒▒▒██  │    │  ██▒▒▒▒▒▒██      │
-│      ▒▒▒▒▒▒▒▒▒▒██│    │██▒▒▒▒▒▒▒▒▒▒      │
-│  ████▒▒▒▒▒▒▒▒▒▒▒▒│    │▒▒▒▒▒▒▒▒▒▒▒▒████  │
-│  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒│    │▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  │
-└──────────────────┘    └──────────────────┘
-  battery · CPU · RAM
-```
-
-*(Rendered from the test golden frames: every pixel of both panels is pinned by tests.)*
 
 ## Features
 
@@ -251,6 +211,13 @@ renderers; after changing one, regenerate them (a test fails until you do):
 
 ```bash
 PYTHONPATH=src python3 scripts/build_demo_data.py
+```
+
+The animated picture at the top (`docs/preview.gif`) comes from the same renderers; re-render
+it with pycairo and Pillow installed:
+
+```bash
+PYTHONPATH=src python3 scripts/build_readme_gif.py
 ```
 
 ## License
