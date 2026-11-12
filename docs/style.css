@@ -147,11 +147,13 @@ p { margin: 0 0 1em; }
 .panels { display: flex; justify-content: center; gap: 36px; }
 .panel-side { display: flex; align-items: stretch; gap: 14px; }
 
+/* LED grid plus a 0.6-LED border (app.js PAD): set here so the layout is right before JS. */
 .module {
   display: block;
   height: min(64vh, 540px);
   min-height: 380px;
   width: auto;
+  aspect-ratio: 10.2 / 35.2;
   background: var(--module);
   border: 1px solid var(--module-edge);
   border-radius: 10px;
@@ -300,6 +302,7 @@ p { margin: 0 0 1em; }
   width: 100%;
   max-width: 84px;
   height: auto;
+  aspect-ratio: 10.2 / 11.2;
   background: var(--module);
   border: 1px solid var(--module-edge);
   border-radius: 7px;
