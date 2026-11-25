@@ -31,7 +31,16 @@ from .bar_sources import BAR_SOURCES
 from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
 from .control import ControlClient, ControlError, DisplaySettings
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from .layout import SIDES, TEMPERATURE_SOURCES, Layout, Widget, default_layout, placed
+from .layout import (
+    SIDES,
+    TEMPERATURE_SOURCES,
+    BlinkRule,
+    Layout,
+    Widget,
+    default_blink,
+    default_layout,
+    placed,
+)
 from .layout_edit import (
     ADD_LABELS,
     ADDABLE,
@@ -84,6 +93,10 @@ SOUND_HINT = (
     "in stereo: the left channel on the left module, the right channel on the right one."
 )
 BAR_SLOTS = ("Left bar", "Middle bar", "Right bar")
+BLINK_LABELS = {"never": "Never", "above": "At or above", "below": "At or below"}
+BLINK_HINT = (
+    "A bar blinks while its value meets its rule, and stops once it is 2 points back."
+)
 Selection = tuple[str, int]  # (layout side, index)
 
 
@@ -512,7 +525,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 rows.append(("Blink from", self._cpu_alert_row()))
             hints.append(TEMPERATURE_HINTS[widget.source])
         elif widget.kind == "bars":
-            for slot, key in enumerate(widget.bars):
+            for slot, (key, rule) in enumerate(zip(widget.bars, widget.blink, strict=True)):
                 combo = self._combo(
                     {key: source.label for key, source in BAR_SOURCES.items()},
                     key,
@@ -520,7 +533,9 @@ class SettingsWindow(Gtk.ApplicationWindow):
                 )
                 combo.set_tooltip_text(BAR_SOURCES[key].hint)
                 rows.append((BAR_SLOTS[slot], combo))
+                rows.append(("  blinks", self._blink_row(slot, rule)))
             rows.append(("Height", self._height_spin()))
+            hints.append(BLINK_HINT)
         elif widget.kind == "equalizer":
             rows.append(("Sound", self._combo(
                 {key: SOUND_LABELS[key] for key in AUDIO_SOURCES},
@@ -552,6 +567,27 @@ class SettingsWindow(Gtk.ApplicationWindow):
         combo.set_active_id(active)
         combo.connect("changed", lambda box: box.get_active_id() and on_change(box.get_active_id()))
         return combo
+
+    def _blink_row(self, slot: int, rule: BlinkRule) -> Gtk.Widget:
+        """When bar `slot` blinks: never, or at or above / at or below a percentage."""
+        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        spin.set_numeric(True)
+        spin.set_value(rule.percent)
+        spin.set_sensitive(rule.when != "never")
+        combo = self._combo(
+            BLINK_LABELS,
+            rule.when,
+            lambda when: self._on_bar_blink(slot, when=when, spin=spin),
+        )
+        spin.connect(
+            "value-changed",
+            lambda spin: self._on_bar_blink(slot, percent=spin.get_value_as_int()),
+        )
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.pack_start(combo, True, True, 0)
+        box.pack_start(spin, False, False, 0)
+        box.pack_start(Gtk.Label(label="%"), False, False, 0)
+        return box
 
     def _height_spin(self) -> Gtk.Widget:
         side, index = self._selected  # type: ignore[misc]
@@ -802,12 +838,45 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self._edit_selected(lambda widget: replace(widget, source=source))
 
     def _on_bar_source(self, slot: int, key: str) -> None:
+        """A new source also gets that source's blink rule (CPU and RAM ≥ 95 %, ...)."""
+
         def change(widget: Widget) -> Widget:
-            sources = list(widget.bars)
-            sources[slot] = key
-            return replace(widget, bars=tuple(sources))
+            sources, rules = list(widget.bars), list(widget.blink)
+            sources[slot], rules[slot] = key, default_blink(key)
+            return replace(widget, bars=tuple(sources), blink=tuple(rules))
 
         self._edit_selected(change)
+
+    def _on_bar_blink(
+        self,
+        slot: int,
+        *,
+        when: str | None = None,
+        percent: int | None = None,
+        spin: Gtk.SpinButton | None = None,
+    ) -> None:
+        widget = self._selected_widget()
+        if widget is None or widget.kind != "bars" or self._layout is None:
+            return
+        rule = widget.blink[slot]
+        if when is not None:
+            if rule.when == "never" and when != "never":
+                # Coming from "never": start from a threshold that suits the direction.
+                default = default_blink(widget.bars[slot])
+                percent = default.percent if default.when == when else (95 if when == "above" else 10)
+            rule = BlinkRule(when, rule.percent if percent is None else percent)
+            if spin is not None:
+                spin.set_sensitive(when != "never")
+                spin.set_value(rule.percent)
+        elif percent is not None:
+            if rule.when == "never" or percent == rule.percent:
+                return
+            rule = BlinkRule(rule.when, percent)
+        rules = list(widget.blink)
+        rules[slot] = rule
+        side, index = self._selected  # type: ignore[misc]
+        layout = replace_widget(self._layout, side, index, replace(widget, blink=tuple(rules)))
+        self._change_layout(layout, delay_ms=NUMBER_DELAY_MS, rebuild=False)
 
     def _on_separator_style(self, style: str) -> None:
         if self._selected is None or self._layout is None:

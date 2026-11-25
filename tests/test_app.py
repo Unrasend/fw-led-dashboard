@@ -33,6 +33,7 @@ from framework_led_dashboard.audio import CaptureRequest, Spectrum
 from framework_led_dashboard.config import AlertsConfig, ConfigError, DashboardConfig, parse_config
 from framework_led_dashboard.control import ControlError, DisplaySettings
 from framework_led_dashboard.layout import (
+    BlinkRule,
     Layout,
     bars,
     classic_left,
@@ -180,16 +181,21 @@ def test_panel_targets_require_both_identities() -> None:
 
 
 def test_render_side_draws_the_classic_layout_like_the_old_panels() -> None:
-    alerts = AlertState(battery=True, cpu_temperature=True)
+    alerts = AlertState(cpu_temperature=True)
+    battery = (("battery", BlinkRule("below", 10)),)
     snapshot = DashboardSnapshot(
-        metrics=METRICS, cpu_temperature_c=120, weather=CLEAR_NIGHT, alerts=alerts
+        metrics=METRICS,
+        cpu_temperature_c=120,
+        weather=CLEAR_NIGHT,
+        alerts=alerts,
+        blinking_bars=frozenset(battery),
     )
     settings = DisplaySettings(40, layout=CLASSIC)
 
     for elapsed, visible in ((0.2, True), (0.7, False)):
         left = render_side("left", settings, snapshot, MONO, elapsed)
         assert left == render_left_panel(
-            METRICS, spectrum=LEVELS, alerts=alerts, blink_on=visible
+            METRICS, spectrum=LEVELS, blinking={"battery"}, blink_on=visible
         ).snapshot()
     right = render_side("right", settings, snapshot, None, 1.7)
     assert right == render_right_panel(
@@ -264,11 +270,17 @@ def test_sensor_sampler_publishes_metrics_and_alerts_without_touching_weather() 
     state = DashboardState()
     state.update(weather=CLEAR_NIGHT)
     clock = FakeClock()
+    rules = {
+        ("battery", BlinkRule("below", 10)),
+        ("ram", BlinkRule("above", 95)),
+        ("cpu", BlinkRule("above", 95)),
+    }
     sampler = SensorSampler(
         state,
         read_metrics=lambda: SystemMetrics(battery_percent=8, cpu_percent=35, ram_used_percent=96),
         read_cpu_temperature=lambda: 121.0,
         alert_policy=AlertPolicy(AlertsConfig()),
+        bar_rules=lambda: rules,
         interval_seconds=1,
         clock=clock,
     )
@@ -278,11 +290,35 @@ def test_sensor_sampler_publishes_metrics_and_alerts_without_touching_weather() 
     assert snapshot.metrics.battery_percent == 8
     assert snapshot.cpu_temperature_c == 121.0
     assert snapshot.weather == CLEAR_NIGHT
-    assert snapshot.alerts == AlertState(battery=True, cpu_temperature=True)
+    assert snapshot.alerts == AlertState(cpu_temperature=True)
+    assert snapshot.blinking_bars == {
+        ("battery", BlinkRule("below", 10)),
+        ("ram", BlinkRule("above", 95)),
+    }
 
-    clock.now = 10.0
-    sampler.step()
-    assert state.snapshot().alerts.ram is True
+
+def test_sensor_sampler_logs_when_a_bar_starts_and_stops_blinking(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loads = iter((90.0, 96.0, 94.0, 92.0))
+    sampler = SensorSampler(
+        DashboardState(),
+        read_metrics=lambda: SystemMetrics(battery_percent=80, cpu_percent=next(loads), ram_used_percent=40),
+        read_cpu_temperature=lambda: 50.0,
+        alert_policy=AlertPolicy(AlertsConfig()),
+        bar_rules=lambda: {("cpu", BlinkRule("above", 95))},
+        interval_seconds=1,
+        clock=FakeClock(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        for _ in range(4):
+            sampler.step()
+
+    assert _messages(caplog) == [
+        "CPU ≥ 95 %: bar blinking at 96 %",
+        "CPU ≥ 95 %: bar stopped blinking",  # 94 is within the 2 points; 92 is not
+    ]
 
 
 def test_sensor_sampler_logs_when_an_alert_starts_and_stops(

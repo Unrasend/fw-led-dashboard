@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from framework_led_dashboard.alerts import AlertState
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, Frame
 from framework_led_dashboard.left_panel import render_left_panel
 from framework_led_dashboard.system_metrics import SystemMetrics, SystemMetricsProvider
@@ -211,11 +210,11 @@ def test_left_panel_blinks_the_bar_that_shows_the_critical_source() -> None:
     metrics = SystemMetrics(
         battery_percent=100, cpu_percent=100, ram_used_percent=100, gpu_percent=100
     )
-    alerts = AlertState(battery=True)
+    blinking = {"battery"}
     bars = ("gpu", "cpu", "battery")
 
-    hidden = render_left_panel(metrics, bars=bars, alerts=alerts, blink_on=False)
-    shown = render_left_panel(metrics, bars=bars, alerts=alerts, blink_on=True)
+    hidden = render_left_panel(metrics, bars=bars, blinking=blinking, blink_on=False)
+    shown = render_left_panel(metrics, bars=bars, blinking=blinking, blink_on=True)
 
     dark_columns = {
         x for x in range(FRAME_WIDTH) if all(hidden.snapshot()[y][x] == 0 for y in range(21))
@@ -291,21 +290,21 @@ def test_left_panel_mirrors_equalizer_in_rows_twenty_three_to_thirty_three() -> 
 
 
 @pytest.mark.parametrize(
-    ("alerts", "hidden_columns"),
+    ("blinking", "hidden_columns"),
     [
-        (AlertState(battery=True), (0, 1)),
-        (AlertState(cpu_usage=True), (3, 4, 5)),
-        (AlertState(ram=True), (7, 8)),
+        ({"battery"}, (0, 1)),
+        ({"cpu"}, (3, 4, 5)),
+        ({"ram"}, (7, 8)),
     ],
 )
 def test_left_panel_blinks_only_the_critical_bar(
-    alerts: AlertState,
+    blinking: set[str],
     hidden_columns: tuple[int, ...],
 ) -> None:
     metrics = SystemMetrics(battery_percent=100, cpu_percent=100, ram_used_percent=100)
     spectrum = (0.4,) * 9
-    visible = render_left_panel(metrics, spectrum=spectrum, alerts=alerts, blink_on=True).snapshot()
-    hidden = render_left_panel(metrics, spectrum=spectrum, alerts=alerts, blink_on=False).snapshot()
+    visible = render_left_panel(metrics, spectrum=spectrum, blinking=blinking, blink_on=True).snapshot()
+    hidden = render_left_panel(metrics, spectrum=spectrum, blinking=blinking, blink_on=False).snapshot()
 
     assert hidden[21:] == visible[21:]
     assert all(hidden[y][column] == 0 for y in range(21) for column in hidden_columns)

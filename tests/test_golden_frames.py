@@ -46,9 +46,9 @@ def _spectrum_from_golden(golden: FramePixels, *, mirrored: bool = False) -> tup
     return tuple(height / EQUALIZER_ROWS for height in ordered)
 
 
-def _render_left(golden: FramePixels, *, alerts: AlertState | None = None, blink_on: bool = True) -> FramePixels:
+def _render_left(golden: FramePixels, *, blinking: frozenset[str] = frozenset(), blink_on: bool = True) -> FramePixels:
     spectrum = _spectrum_from_golden(golden, mirrored=True)
-    return render_left_panel(LEFT_METRICS, spectrum=spectrum, alerts=alerts, blink_on=blink_on).snapshot()
+    return render_left_panel(LEFT_METRICS, spectrum=spectrum, blinking=blinking, blink_on=blink_on).snapshot()
 
 
 def _render_right(
@@ -92,7 +92,7 @@ def _cases() -> tuple[tuple[str, FramePixels, FramePixels], ...]:
     cpu_alert = _load_golden("right_alert_cpu_off.txt")
     return (
         ("left", _render_left(left), left),
-        ("left-battery-alert-off", _render_left(left_alert, alerts=AlertState(battery=True), blink_on=False), left_alert),
+        ("left-battery-alert-off", _render_left(left_alert, blinking=frozenset({"battery"}), blink_on=False), left_alert),
         ("right-local", _render_right(local, weather_code=None, cpu_temperature_c=54), local),
         ("right-showers-day-0", _render_right(showers, weather_code=80), showers),
         ("right-clear-0", _render_right(clear_0), clear_0),

@@ -8,7 +8,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import FrameType
@@ -16,6 +16,8 @@ from typing import Protocol
 
 from .alerts import AlertInputs, AlertPolicy, AlertState
 from .audio import CaptureRequest, SoundSpectrum, Spectrum
+from .bar_alerts import BarBlinker, BarRule, describe_rule
+from .bar_sources import BAR_SOURCES
 from .config import ConfigError, DashboardConfig
 from .control import (
     ControlError,
@@ -28,7 +30,7 @@ from .control import (
 )
 from .device_discovery import resolve_device_path
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from .layout import SIDES
+from .layout import SIDES, bar_rules
 from .location import (
     Coordinates,
     IpLocationClient,
@@ -87,6 +89,7 @@ class DashboardSnapshot:
     gpu_temperature_c: float | None = None
     weather: WeatherReading | None = None
     alerts: AlertState = NO_ALERTS
+    blinking_bars: frozenset[BarRule] = frozenset()
 
 
 class DashboardState:
@@ -137,6 +140,7 @@ def render_side(
             gpu_temperature_c=snapshot.gpu_temperature_c,
             weather=snapshot.weather,
             alerts=snapshot.alerts,
+            blinking_bars=snapshot.blinking_bars,
         ),
         spectrum=None if spectrum is None else spectrum.side(side),
         mirrored=side == "left",
@@ -162,7 +166,7 @@ def wanted_capture(settings: DisplaySettings) -> CaptureRequest | None:
 
 
 class SensorSampler:
-    """Read local sensors, evaluate alerts and publish both."""
+    """Read local sensors, evaluate alerts and the bars' blink rules, and publish them."""
 
     def __init__(
         self,
@@ -172,6 +176,7 @@ class SensorSampler:
         read_cpu_temperature: Callable[[], float | None],
         alert_policy: AlertPolicy,
         read_gpu_temperature: Callable[[], float | None] = lambda: None,
+        bar_rules: Callable[[], Iterable[BarRule]] = frozenset,
         interval_seconds: float,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger = LOGGER,
@@ -180,6 +185,8 @@ class SensorSampler:
         self._read_metrics = read_metrics
         self._read_cpu_temperature = read_cpu_temperature
         self._read_gpu_temperature = read_gpu_temperature
+        self._bar_rules = bar_rules
+        self._blinker = BarBlinker()
         self._alert_policy = alert_policy
         self._interval = interval_seconds
         self._clock = clock
@@ -189,25 +196,34 @@ class SensorSampler:
         metrics = self._read_metrics()
         cpu_temperature = self._read_cpu_temperature()
         weather = self._state.snapshot().weather
-        ram_used = metrics.ram_used_percent
         alerts = self._alert_policy.update(
             AlertInputs(
-                battery_percent=metrics.battery_percent,
-                cpu_usage_percent=metrics.cpu_percent,
-                ram_available_percent=None if ram_used is None else 100 - ram_used,
                 cpu_temperature_c=cpu_temperature,
                 outside_temperature_c=None if weather is None else weather.temperature_c,
             ),
             now_seconds=self._clock(),
         )
-        self._log_changes(self._state.snapshot().alerts, alerts, cpu_temperature)
+        previous = self._state.snapshot()
+        blinking = self._blinker.update(self._bar_rules(), metrics)
+        self._log_changes(previous.alerts, alerts, cpu_temperature)
+        self._log_bars(previous.blinking_bars, blinking, metrics)
         self._state.update(
             metrics=metrics,
             cpu_temperature_c=cpu_temperature,
             gpu_temperature_c=self._read_gpu_temperature(),
             alerts=alerts,
+            blinking_bars=blinking,
         )
         return self._interval
+
+    def _log_bars(
+        self, previous: frozenset[BarRule], current: frozenset[BarRule], metrics: SystemMetrics
+    ) -> None:
+        for key, rule in sorted(current - previous, key=str):
+            value = BAR_SOURCES[key].read(metrics)
+            self._logger.info("%s: bar blinking at %.0f %%", describe_rule(key, rule), value or 0)
+        for key, rule in sorted(previous - current, key=str):
+            self._logger.info("%s: bar stopped blinking", describe_rule(key, rule))
 
     def _log_changes(
         self, previous: AlertState, current: AlertState, cpu_temperature: float | None
@@ -544,6 +560,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         read_metrics=SystemMetricsProvider().read,
         read_cpu_temperature=CpuTemperatureProvider().read_celsius,
         read_gpu_temperature=GpuTemperatureProvider().read_celsius,
+        bar_rules=lambda: bar_rules(store.current().layout),
         alert_policy=AlertPolicy(
             config.alerts,
             cpu_temperature_critical=lambda: store.current().cpu_alert_celsius,

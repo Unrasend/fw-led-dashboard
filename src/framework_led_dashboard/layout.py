@@ -7,7 +7,8 @@ display.json next to the other live settings.
 Widgets (JSON form in brackets):
   weather      the animated weather icon, 10 rows          {"kind": "weather"}
   temperature  a number, 5 rows; source cpu, gpu, outside  {"kind": "temperature", "source": "cpu"}
-  bars         three vertical bars, resizable              {"kind": "bars", "bars": [...], "height": 15}
+  bars         three vertical bars, resizable, each with   {"kind": "bars", "bars": [...], "height": 15,
+               the rule it blinks by                        "blink": [{"when": "below", "percent": 10}, ...]}
   equalizer    the sound spectrum, resizable               {"kind": "equalizer", "height": 11}
   separator    a lit line (1 row) or empty space           {"kind": "separator", "style": "line"}
                                                             {"kind": "separator", "style": "space", "height": 1}
@@ -24,6 +25,7 @@ from .pixel_font import GLYPH_HEIGHT
 from .weather_icons import ICON_HEIGHT
 
 WIDGET_KINDS = ("weather", "temperature", "bars", "equalizer", "separator")
+BLINK_WHEN = ("never", "above", "below")
 TEMPERATURE_SOURCES = ("cpu", "gpu", "outside")
 SEPARATOR_STYLES = ("line", "space")
 SIDES = ("left", "right")
@@ -37,6 +39,47 @@ MIN_SPACE_HEIGHT = 1
 MAX_WIDGETS_PER_PANEL = 16
 
 _FIXED_HEIGHTS = {"weather": WEATHER_HEIGHT, "temperature": TEMPERATURE_HEIGHT}
+
+
+@dataclass(frozen=True, slots=True)
+class BlinkRule:
+    """When a bar blinks: at or above `percent`, at or below it, or never."""
+
+    when: str = "never"
+    percent: int = 0
+
+    def __post_init__(self) -> None:
+        if self.when not in BLINK_WHEN:
+            raise ValueError(f"blink 'when' must be one of {', '.join(BLINK_WHEN)}, got {self.when!r}")
+        if isinstance(self.percent, bool) or not isinstance(self.percent, int):
+            raise TypeError("blink percent must be a whole number")
+        if not 0 <= self.percent <= 100:
+            raise ValueError(f"blink percent must be between 0 and 100, got {self.percent}")
+
+    def to_json(self) -> dict[str, object]:
+        return {"when": self.when, "percent": self.percent}
+
+
+NEVER = BlinkRule()
+# What each source blinks at unless the settings say otherwise.
+DEFAULT_BLINK = {
+    "battery": BlinkRule("below", 10),
+    "cpu": BlinkRule("above", 95),
+    "ram": BlinkRule("above", 95),
+}
+
+
+def default_blink(source: str) -> BlinkRule:
+    return DEFAULT_BLINK.get(source, NEVER)
+
+
+def blink_rule_from_json(raw: object) -> BlinkRule:
+    if not isinstance(raw, dict):
+        raise TypeError("each blink rule must be a JSON object")
+    unknown = set(raw) - {"when", "percent"}
+    if unknown:
+        raise ValueError(f"blink rule has unknown fields: {', '.join(sorted(map(str, unknown)))}")
+    return BlinkRule(raw.get("when", "never"), raw.get("percent", 0))  # type: ignore[arg-type]
 _MIN_HEIGHTS = {"bars": MIN_BARS_HEIGHT, "equalizer": MIN_EQUALIZER_HEIGHT}
 
 
@@ -49,6 +92,7 @@ class Widget:
     source: str = ""  # temperature
     bars: tuple[str, ...] = ()  # bars
     style: str = ""  # separator
+    blink: tuple[BlinkRule, ...] = ()  # bars: one rule per bar
 
     def __post_init__(self) -> None:
         if self.kind not in WIDGET_KINDS:
@@ -64,6 +108,10 @@ class Widget:
             if not isinstance(self.bars, tuple):
                 raise TypeError("bars must be a tuple of source names")
             validate_bars(self.bars)
+            if not isinstance(self.blink, tuple) or len(self.blink) != len(self.bars) or not all(
+                isinstance(rule, BlinkRule) for rule in self.blink
+            ):
+                raise ValueError(f"bars need one blink rule per bar ({len(self.bars)})")
         if self.kind == "separator" and self.style not in SEPARATOR_STYLES:
             raise ValueError(
                 f"separator style must be one of {', '.join(SEPARATOR_STYLES)}, got {self.style!r}"
@@ -104,7 +152,12 @@ class Widget:
         if self.kind == "temperature":
             return {"kind": self.kind, "source": self.source}
         if self.kind == "bars":
-            return {"kind": self.kind, "bars": list(self.bars), "height": self.height}
+            return {
+                "kind": self.kind,
+                "bars": list(self.bars),
+                "height": self.height,
+                "blink": [rule.to_json() for rule in self.blink],
+            }
         if self.kind == "equalizer":
             return {"kind": self.kind, "height": self.height}
         if self.kind == "separator":
@@ -122,8 +175,14 @@ def temperature(source: str) -> Widget:
     return Widget("temperature", TEMPERATURE_HEIGHT, source=source)
 
 
-def bars(sources: Sequence[str] = DEFAULT_BARS, height: int = 15) -> Widget:
-    return Widget("bars", height, bars=tuple(sources))
+def bars(
+    sources: Sequence[str] = DEFAULT_BARS,
+    height: int = 15,
+    blink: Sequence[BlinkRule] | None = None,
+) -> Widget:
+    """Bars; without `blink`, each bar blinks by its source's default rule."""
+    rules = tuple(default_blink(key) for key in sources) if blink is None else tuple(blink)
+    return Widget("bars", height, bars=tuple(sources), blink=rules)
 
 
 def equalizer(height: int = 11) -> Widget:
@@ -147,7 +206,7 @@ def widget_from_json(raw: object) -> Widget:
     allowed = {
         "weather": {"kind"},
         "temperature": {"kind", "source"},
-        "bars": {"kind", "bars", "height"},
+        "bars": {"kind", "bars", "height", "blink"},
         "equalizer": {"kind", "height"},
         "separator": {"kind", "style", "height"},
     }.get(kind)
@@ -164,7 +223,17 @@ def widget_from_json(raw: object) -> Widget:
         sources = raw.get("bars")
         if not isinstance(sources, list):
             raise TypeError("bars must be a list of 3 source names")
-        return Widget("bars", raw.get("height", 15), bars=tuple(sources))  # type: ignore[arg-type]
+        rules = raw.get("blink")
+        if rules is None:  # saved by 1.4.0: each source's default
+            rules = [default_blink(key).to_json() for key in sources if isinstance(key, str)]
+        if not isinstance(rules, list):
+            raise TypeError("blink must be a list of rules, one per bar")
+        return Widget(
+            "bars",
+            raw.get("height", 15),  # type: ignore[arg-type]
+            bars=tuple(sources),
+            blink=tuple(blink_rule_from_json(rule) for rule in rules),
+        )
     if kind == "equalizer":
         return Widget("equalizer", raw.get("height", 11))  # type: ignore[arg-type]
     style = _string(raw.get("style"), "separator style")
@@ -259,6 +328,17 @@ def default_layout(bar_sources: Sequence[str] = DEFAULT_BARS) -> Layout:
             equalizer(11),
         ),
     )
+
+
+def bar_rules(layout: Layout) -> set[tuple[str, BlinkRule]]:
+    """Every (source, rule) a bar in the layout blinks by, "never" left out."""
+    return {
+        (key, rule)
+        for widget in (*layout.left, *layout.right)
+        if widget.kind == "bars"
+        for key, rule in zip(widget.bars, widget.blink, strict=True)
+        if rule.when != "never"
+    }
 
 
 def classic_left(bar_sources: Sequence[str] = DEFAULT_BARS) -> tuple[Widget, ...]:

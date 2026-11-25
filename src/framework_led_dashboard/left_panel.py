@@ -3,9 +3,8 @@ golden frames, which check that the layout renderer still draws it pixel for pix
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
-from .alerts import AlertState
 from .bar_sources import DEFAULT_BARS
 from .frame import Frame
 from .layout import classic_left
@@ -18,12 +17,20 @@ def render_left_panel(
     *,
     bars: Sequence[str] = DEFAULT_BARS,
     spectrum: Sequence[float] | None = None,
-    alerts: AlertState | None = None,
+    blinking: Collection[str] = (),
     blink_on: bool = True,
 ) -> Frame:
+    """`blinking`: the sources whose bars blink (their rule holds)."""
+    widgets = classic_left(bars)
+    rules = widgets[0]
     return render_panel(
-        classic_left(bars),
-        PanelData(metrics=metrics, alerts=alerts or AlertState()),
+        widgets,
+        PanelData(
+            metrics=metrics,
+            blinking_bars=frozenset(
+                (key, rule) for key, rule in zip(rules.bars, rules.blink, strict=True) if key in blinking
+            ),
+        ),
         spectrum=spectrum,
         mirrored=True,
         blink_on=blink_on,

@@ -28,9 +28,10 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 - **Default layout:** the outside temperature over battery, CPU and RAM bars on the left;
   weather, GPU and CPU temperature on the right; the equalizer along the bottom of both,
   mirrored so the bass meets in the middle.
-- **Alerts:** only the critical value blinks, at 1 Hz, with hysteresis — battery ≤ 10 %,
-  less than 5 % RAM free for 10 s, CPU at 120 °C (set your own). CPU-usage and
-  outside-temperature limits are optional.
+- **Alerts:** only the critical value blinks, at 1 Hz. Each bar has its own rule — at or
+  above, or at or below a percentage, or never; by default CPU and RAM at 95 % and more,
+  battery at 10 % and less. The CPU temperature blinks from 120 °C (set your own); an
+  outside-temperature range is optional.
 - **Settings window (GTK 3):** both modules drawn LED for LED with what they show right now;
   click a widget to change it, drag it to move it, drag its bottom edge to resize it. It runs
   only while it is open.
@@ -167,7 +168,8 @@ right now, with an outline around each widget:
 
 - click a widget to select it; its settings appear on the right — the source of a
   temperature (and, for the CPU, the temperature it blinks from, 40–150 °C), the source of
-  each bar, the sound of the equalizer, the style of a separator, the height;
+  each bar and when it blinks, the sound of the equalizer, the style of a separator, the
+  height;
 - drag it onto empty rows (spaces or the free rows at the bottom) to put it exactly there —
   nothing else moves; drag it onto other widgets, or onto the other module, to slot it in
   between them;
@@ -248,7 +250,7 @@ Restart the service after editing it.
 | `location.vpn_interface_prefixes` | `tun, tap, wg, …` | while such an interface is up, IP lookup is skipped |
 | `updates.metrics_seconds` | `1` | local sensors |
 | `updates.weather_seconds` | `900` | weather refresh |
-| `alerts.*` | see example | blink thresholds with separate recovery values; the CPU temperature widget's *Blink from* overrides `cpu_temperature_critical_c` and keeps the gap to `cpu_temperature_recovery_c` |
+| `alerts.*` | see example | the CPU temperature's blink threshold and recovery (the widget's *Blink from* overrides `cpu_temperature_critical_c` and keeps the gap) and the optional outside range. Bars blink by their rules in the settings window; the older `battery_*`, `ram_*` and `cpu_usage_critical_percent` keys are ignored |
 
 **Location and privacy:** explicit coordinates win. Otherwise the IP-based location is used
 only when no VPN is detected (so a VPN exit country never ends up in the cache), then the last

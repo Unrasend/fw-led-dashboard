@@ -5,15 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .alerts import AlertState
 from .system_metrics import SystemMetrics
 
 BAR_COUNT = 3
 BAR_SLOT_NAMES = ("Bar 1 (left)", "Bar 2 (middle)", "Bar 3 (right)")
-
-
-def _never(_alerts: AlertState) -> bool:
-    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,7 +17,6 @@ class BarSource:
     label: str
     hint: str
     read: Callable[[SystemMetrics], float | None]
-    critical: Callable[[AlertState], bool] = _never
 
 
 BAR_SOURCES: dict[str, BarSource] = {
@@ -31,10 +25,8 @@ BAR_SOURCES: dict[str, BarSource] = {
         BarSource(
             "battery",
             "Battery",
-            "Battery charge, %.\nSource: /sys/class/power_supply/BAT1/capacity\n"
-            "Blinks while critical ([alerts] battery_* in config.toml).",
+            "Battery charge, %.\nSource: /sys/class/power_supply/BAT1/capacity",
             lambda metrics: metrics.battery_percent,
-            lambda alerts: alerts.battery,
         ),
         BarSource(
             "cpu",
@@ -42,15 +34,12 @@ BAR_SOURCES: dict[str, BarSource] = {
             "CPU load across all cores, %.\nSource: /proc/stat, the difference between\n"
             "two samples taken one second apart.",
             lambda metrics: metrics.cpu_percent,
-            lambda alerts: alerts.cpu_usage,
         ),
         BarSource(
             "ram",
             "RAM",
-            "Memory in use, %.\nSource: /proc/meminfo, MemTotal − MemAvailable\n"
-            "Blinks while critical ([alerts] ram_* in config.toml).",
+            "Memory in use, %.\nSource: /proc/meminfo, MemTotal − MemAvailable",
             lambda metrics: metrics.ram_used_percent,
-            lambda alerts: alerts.ram,
         ),
         BarSource(
             "gpu",

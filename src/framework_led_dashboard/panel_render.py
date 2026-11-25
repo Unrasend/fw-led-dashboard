@@ -10,7 +10,7 @@ from .alerts import AlertState
 from .bar_sources import BAR_SOURCES
 from .equalizer import draw_equalizer
 from .frame import FRAME_WIDTH, Frame
-from .layout import Widget, placed
+from .layout import BlinkRule, Widget, placed
 from .pixel_font import GLYPH_HEIGHT, draw_text, text_width
 from .system_metrics import SystemMetrics
 from .weather import WeatherReading
@@ -32,6 +32,7 @@ class PanelData:
     gpu_temperature_c: float | None = None
     weather: WeatherReading | None = None
     alerts: AlertState = NO_ALERTS
+    blinking_bars: frozenset[tuple[str, BlinkRule]] = frozenset()  # (source, rule) that hold
 
 
 def render_panel(
@@ -121,11 +122,9 @@ def _draw_centered(frame: Frame, text: str, *, y: int, intensity: int) -> None:
 
 def _draw_bars(frame: Frame, widget: Widget, top: int, data: PanelData, *, blink_on: bool) -> None:
     bottom = top + widget.height - 1
-    for columns, key in zip(BAR_COLUMNS, widget.bars, strict=True):
-        source = BAR_SOURCES[key]
-        # A critical source blinks in whichever bar shows it.
-        if blink_on or not source.critical(data.alerts):
-            _draw_bar(frame, columns, source.read(data.metrics), bottom, widget.height)
+    for columns, key, rule in zip(BAR_COLUMNS, widget.bars, widget.blink, strict=True):
+        if blink_on or (key, rule) not in data.blinking_bars:
+            _draw_bar(frame, columns, BAR_SOURCES[key].read(data.metrics), bottom, widget.height)
 
 
 def _draw_bar(

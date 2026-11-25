@@ -41,70 +41,13 @@ def test_cpu_temperature_follows_a_threshold_changed_at_runtime_with_the_configu
     assert alert(95, 4) is False
 
 
-def test_battery_enters_at_ten_percent_and_recovers_at_twelve_percent() -> None:
-    policy = AlertPolicy(AlertsConfig())
-
-    states = [
-        policy.update(AlertInputs(battery_percent=value), now_seconds=index)
-        for index, value in enumerate((11, 10, 11, 12))
-    ]
-
-    assert [state.battery for state in states] == [False, True, True, False]
-
-
-def test_ram_requires_ten_continuous_seconds_below_available_threshold() -> None:
-    policy = AlertPolicy(AlertsConfig())
-
-    before_debounce = policy.update(
-        AlertInputs(ram_available_percent=5), now_seconds=100
-    )
-    almost_due = policy.update(
-        AlertInputs(ram_available_percent=5), now_seconds=109.999
-    )
-    due = policy.update(AlertInputs(ram_available_percent=5), now_seconds=110)
-    hysteresis = policy.update(AlertInputs(ram_available_percent=6), now_seconds=111)
-    recovered = policy.update(AlertInputs(ram_available_percent=8), now_seconds=112)
-
-    assert before_debounce.ram is False
-    assert almost_due.ram is False
-    assert due.ram is True
-    assert hysteresis.ram is True
-    assert recovered.ram is False
-
-
-def test_ram_debounce_restarts_when_low_memory_condition_is_interrupted() -> None:
-    policy = AlertPolicy(AlertsConfig())
-
-    policy.update(AlertInputs(ram_available_percent=5), now_seconds=0)
-    policy.update(AlertInputs(ram_available_percent=6), now_seconds=9)
-    restarted = policy.update(AlertInputs(ram_available_percent=5), now_seconds=10)
-    almost_due = policy.update(AlertInputs(ram_available_percent=5), now_seconds=19.999)
-    due = policy.update(AlertInputs(ram_available_percent=5), now_seconds=20)
-
-    assert restarted.ram is False
-    assert almost_due.ram is False
-    assert due.ram is True
-
-
-def test_missing_and_non_finite_values_never_remain_critical() -> None:
-    policy = AlertPolicy(AlertsConfig())
-    policy.update(
-        AlertInputs(
-            battery_percent=5,
-            cpu_temperature_c=125,
-            ram_available_percent=2,
-        ),
-        now_seconds=0,
-    )
-    policy.update(AlertInputs(ram_available_percent=2), now_seconds=10)
+def test_missing_and_non_finite_temperatures_never_remain_critical() -> None:
+    policy = AlertPolicy(AlertsConfig(outside_temperature_max_c=30))
+    policy.update(AlertInputs(cpu_temperature_c=125, outside_temperature_c=35), now_seconds=0)
 
     missing = policy.update(AlertInputs(), now_seconds=11)
     non_finite = policy.update(
-        AlertInputs(
-            battery_percent=float("nan"),
-            cpu_temperature_c=float("inf"),
-            ram_available_percent=float("-inf"),
-        ),
+        AlertInputs(cpu_temperature_c=float("inf"), outside_temperature_c=float("nan")),
         now_seconds=12,
     )
 
@@ -112,48 +55,20 @@ def test_missing_and_non_finite_values_never_remain_critical() -> None:
     assert non_finite.any_critical is False
 
 
-def test_optional_thresholds_trigger_only_when_configured() -> None:
+def test_outside_temperature_limits_trigger_only_when_configured() -> None:
     disabled = AlertPolicy(AlertsConfig()).update(
-        AlertInputs(
-            cpu_usage_percent=100,
-            outside_temperature_c=100,
-        ),
-        now_seconds=0,
+        AlertInputs(outside_temperature_c=100), now_seconds=0
     )
-    policy = AlertPolicy(
-        AlertsConfig(
-            cpu_usage_critical_percent=95,
-            outside_temperature_min_c=-20,
-            outside_temperature_max_c=38,
-        )
-    )
+    policy = AlertPolicy(AlertsConfig(outside_temperature_min_c=-20, outside_temperature_max_c=38))
 
-    upper = policy.update(
-        AlertInputs(
-            cpu_usage_percent=95,
-            outside_temperature_c=38,
-        ),
-        now_seconds=0,
-    )
-    lower = policy.update(
-        AlertInputs(
-            cpu_usage_percent=94.9,
-            outside_temperature_c=-20,
-        ),
-        now_seconds=1,
-    )
-    normal = policy.update(
-        AlertInputs(
-            cpu_usage_percent=50,
-            outside_temperature_c=18,
-        ),
-        now_seconds=2,
-    )
-
-    assert disabled.cpu_usage is False
     assert disabled.outside_temperature is False
-    assert upper.cpu_usage is True
-    assert upper.outside_temperature is True
-    assert lower.cpu_usage is False
-    assert lower.outside_temperature is True
-    assert normal.any_critical is False
+    assert policy.update(AlertInputs(outside_temperature_c=38), now_seconds=0).outside_temperature
+    assert not policy.update(AlertInputs(outside_temperature_c=37.9), now_seconds=1).outside_temperature
+    assert policy.update(AlertInputs(outside_temperature_c=-20), now_seconds=2).outside_temperature
+
+
+def test_old_bar_alert_settings_still_load_but_no_longer_drive_anything() -> None:
+    # Bars blink by their own rules now (bar_alerts); a config from 1.4 still parses.
+    policy = AlertPolicy(AlertsConfig(battery_critical_percent=50, cpu_usage_critical_percent=10))
+
+    assert policy.update(AlertInputs(cpu_temperature_c=60), now_seconds=0).any_critical is False
