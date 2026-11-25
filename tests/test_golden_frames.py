@@ -12,7 +12,7 @@ from framework_led_dashboard.system_metrics import SystemMetrics
 from framework_led_dashboard.weather import WeatherReading
 
 GOLDEN_DIRECTORY = Path(__file__).parent / "goldens"
-PIXEL_VALUES = {".": 0, "L": 128, "#": 220, "?": 24}
+PIXEL_VALUES = {".": 0, "-": 64, "L": 128, "#": 220, "?": 24}
 LEFT_METRICS = SystemMetrics(battery_percent=78, cpu_percent=35, ram_used_percent=62)
 
 
@@ -96,7 +96,7 @@ def _cases() -> tuple[tuple[str, FramePixels, FramePixels], ...]:
         ("right-local", _render_right(local, weather_code=None, cpu_temperature_c=54), local),
         ("right-showers-day-0", _render_right(showers, weather_code=80), showers),
         ("right-clear-0", _render_right(clear_0), clear_0),
-        ("right-clear-1", _render_right(clear_1, frame_index=1), clear_1),
+        ("right-clear-1", _render_right(clear_1, frame_index=2), clear_1),
         ("right-partly-cloudy-night-0", _render_right(partly_cloudy_night, weather_code=2, is_day=False), partly_cloudy_night),
         ("right-heavy-rain-day-0", _render_right(heavy_rain, weather_code=65), heavy_rain),
         ("right-thunder-hail-night-1", _render_right(thunder_hail, weather_code=99, is_day=False, frame_index=1), thunder_hail),

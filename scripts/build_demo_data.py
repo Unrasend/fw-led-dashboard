@@ -34,7 +34,7 @@ from framework_led_dashboard.weather_icons import (
 )
 
 OUTPUT = Path(__file__).resolve().parents[1] / "docs" / "demo-data.js"
-PIXEL_CHARS = {0: ".", 24: "u", 128: "L", 220: "#"}
+PIXEL_CHARS = {0: ".", 24: "u", **{value: char for char, value in ICON_INTENSITIES.items()}}
 TIMELINE_STEPS = 40  # one sensor sample per second, then it loops
 OUTSIDE_TEMPERATURE_C = 12.0
 PANEL_FRAME_SECONDS = 0.15  # what the hardware manages in grayscale: about 6-7 FPS

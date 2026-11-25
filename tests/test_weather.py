@@ -34,7 +34,19 @@ from framework_led_dashboard.weather_codes import (
     WeatherSymbol,
     classify_weather_code,
 )
-from framework_led_dashboard.weather_icons import ICON_FRAMES, ICON_HEIGHT, ICON_WIDTH, weather_icon
+from framework_led_dashboard.weather_icons import (
+    BIG_FLAKE,
+    BIG_MOON,
+    FLAKE,
+    ICON_FRAMES,
+    ICON_HEIGHT,
+    ICON_INTENSITIES,
+    ICON_WIDTH,
+    MOON,
+    Scene,
+    WeatherIconArtist,
+    weather_icon,
+)
 
 
 def test_vpn_detector_reports_active_for_networkmanager_vpn() -> None:
@@ -398,11 +410,74 @@ def test_every_weather_symbol_has_distinct_day_and_night_art(symbol: WeatherSymb
 
 
 @pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
-def test_every_night_icon_shows_the_moon_or_a_snowflake_in_a_top_corner(symbol: WeatherSymbol) -> None:
-    night = weather_icon(symbol, is_day=False, frame_index=0)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_every_animation_loops_without_a_seam(symbol: WeatherSymbol, is_day: bool) -> None:
+    """The icon starts over after ICON_FRAMES: what it would draw next must be its first frames."""
 
-    corners = ("".join(row[6:9] for row in night[0:4]), "".join(row[0:4] for row in night[2:7]))
-    assert any("#" in corner or "L" in corner for corner in corners)
+    def unwrapped(index: int) -> tuple[str, ...]:
+        return WeatherIconArtist(Scene(symbol, is_day, index)).draw()
+
+    following = [unwrapped(ICON_FRAMES + index) for index in range(ICON_FRAMES)]
+    assert following == [unwrapped(index) for index in range(ICON_FRAMES)]
+
+
+def _lit(icon: tuple[str, ...], x: int, y: int) -> bool:
+    return 0 <= x < ICON_WIDTH and 0 <= y < ICON_HEIGHT and icon[y][x] in {"L", "#"}
+
+
+def _shows(icon: tuple[str, ...], art: tuple[str, ...], x0: int, y0: int) -> bool:
+    """The glyph fills its box exactly: every pixel of it lit, every gap dark."""
+    return all(
+        _lit(icon, x0 + dx, y0 + dy) == (char != ".")
+        for dy, row in enumerate(art)
+        for dx, char in enumerate(row)
+    )
+
+
+def _shows_anywhere(icon: tuple[str, ...], art: tuple[str, ...]) -> bool:
+    return any(_shows(icon, art, x, y) for y in range(ICON_HEIGHT) for x in range(ICON_WIDTH))
+
+
+@pytest.mark.parametrize("symbol", DISPLAY_SYMBOLS)
+def test_every_night_icon_shows_a_crescent_moon(symbol: WeatherSymbol) -> None:
+    for index in range(ICON_FRAMES):
+        night = weather_icon(symbol, is_day=False, frame_index=index)
+
+        assert _shows_anywhere(night, MOON) or _shows_anywhere(night, BIG_MOON)
+
+
+@pytest.mark.parametrize("weather_code", [0, 1, 2])
+def test_blinking_stars_never_touch_the_moon_or_a_cloud(weather_code: int) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=False, frame_index=index) for index in range(ICON_FRAMES)]
+    cells = [(x, y) for y in range(ICON_HEIGHT) for x in range(ICON_WIDTH)]
+    steady = {(x, y) for x, y in cells if all(_lit(icon, x, y) for icon in cycle)}
+    stars = {(x, y) for x, y in cells if any(_lit(icon, x, y) for icon in cycle)} - steady
+
+    assert stars
+    assert all(max(abs(x - sx), abs(y - sy)) >= 2 for x, y in stars for sx, sy in steady)
+
+
+@pytest.mark.parametrize("is_day", [True, False])
+def test_partly_cloudy_shows_nothing_under_its_cloud(is_day: bool) -> None:
+    """Anything below the cloud would read as precipitation."""
+    symbol = classify_weather_code(2)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+
+    assert all(row == "." * ICON_WIDTH for icon in cycle for row in icon[7:])
+
+
+def test_the_sun_turns_its_rays_once_a_second() -> None:
+    """At two frames a second: a sun that flips on every frame flickers at the edge of sight."""
+    symbol = classify_weather_code(0)
+    cycle = [weather_icon(symbol, is_day=True, frame_index=index) for index in range(ICON_FRAMES)]
+
+    assert cycle[0] == cycle[1] != cycle[2] == cycle[3] != cycle[4]
+
+
+def test_the_dim_level_is_far_below_the_bright_one() -> None:
+    """Drizzle against rain and snow grains against snow differ only by this level."""
+    assert ICON_INTENSITIES["L"] * 3 <= ICON_INTENSITIES["#"]
 
 
 @pytest.mark.parametrize(
@@ -416,13 +491,25 @@ def test_light_and_heavy_weather_have_different_art(light_code: int, heavy_code:
     assert light != heavy
 
 
-DRIZZLE_AND_RAIN_CODES = (51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82)
-SNOW_CODES = (71, 73, 75, 77, 85, 86)
+SINGLE_DROP_CODES = (51, 53, 56)  # light and moderate drizzle
+STROKE_CODES = (55, 57, 61, 63, 65, 66, 67, 80, 81, 82)  # dense drizzle and every rain
+FREEZING_CODES = (48, 56, 57, 66, 67)  # rime fog, freezing drizzle, freezing rain
+FLAKE_CORNER = (6, 7)
+SNOW_CODES = (71, 73, 75, 85, 86)
+SNOW_GRAINS_CODE = 77
 THUNDER_CODES = (95, 96, 99)
 
 
-def _lit(icon: tuple[str, ...], x: int, y: int) -> bool:
-    return 0 <= x < ICON_WIDTH and 0 <= y < ICON_HEIGHT and icon[y][x] in {"L", "#"}
+def _falling(icon: tuple[str, ...], weather_code: int) -> dict[tuple[int, int], str]:
+    """What falls from the cloud: the lit pixels of the bottom rows, the snowflake aside."""
+    flake_x, flake_y = FLAKE_CORNER
+    return {
+        (x, y): icon[y][x]
+        for y in range(5, ICON_HEIGHT)
+        for x in range(ICON_WIDTH)
+        if _lit(icon, x, y)
+        and not (weather_code in FREEZING_CODES and x >= flake_x - 1 and y >= flake_y - 1)
+    }
 
 
 def _down_left_strokes(icon: tuple[str, ...]) -> set[tuple[int, int]]:
@@ -432,7 +519,63 @@ def _down_left_strokes(icon: tuple[str, ...]) -> set[tuple[int, int]]:
     return {(x, y) for y in range(5, 9) for x in range(1, 9) if _lit(icon, x, y) and continues(x, y)}
 
 
-@pytest.mark.parametrize("weather_code", DRIZZLE_AND_RAIN_CODES)
+@pytest.mark.parametrize("weather_code", SINGLE_DROP_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_drizzle_falls_as_single_drops_moving_down_left(weather_code: int, is_day: bool) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+    drops = [set(_falling(icon, weather_code)) for icon in cycle]
+
+    assert all(drops)
+    assert not any((x - 1, y + 1) in frame_drops for frame_drops in drops for x, y in frame_drops)
+    moved = 0
+    for now, later in zip(drops, drops[1:] + drops[:1], strict=True):
+        if later != now:
+            moved += 1
+            assert {(x - 1, y + 1) for x, y in now if x > 0 and y < ICON_HEIGHT - 1} <= later
+    assert moved
+
+
+@pytest.mark.parametrize("weather_code", SINGLE_DROP_CODES + STROKE_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_drizzle_is_dim_and_rain_is_bright(weather_code: int, is_day: bool) -> None:
+    symbol = classify_weather_code(weather_code)
+    drizzle = symbol.kind in {WeatherKind.DRIZZLE, WeatherKind.FREEZING_DRIZZLE}
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+
+    levels = {level for icon in cycle for level in _falling(icon, weather_code).values()}
+    assert levels == ({"L"} if drizzle else {"#"})
+
+
+def _corner_flake(icon: tuple[str, ...]) -> str | None:
+    """"open" or "filled" when the bottom right corner holds the small snowflake, else None.
+
+    The crystal itself is bright, its gaps are dark or all dim, and one pixel of darkness
+    around the glyph keeps it apart from the precipitation."""
+    x0, y0 = FLAKE_CORNER
+    crystal = {icon[y0 + dy][x0 + dx] for dy, row in enumerate(FLAKE) for dx, c in enumerate(row) if c != "."}
+    gaps = {icon[y0 + dy][x0 + dx] for dy, row in enumerate(FLAKE) for dx, c in enumerate(row) if c == "."}
+    margin = {icon[y0 - 1][x] for x in range(x0 - 1, ICON_WIDTH)} | {
+        icon[y][x0 - 1] for y in range(y0, ICON_HEIGHT)
+    }
+    if crystal != {"#"} or margin != {"."} or gaps not in ({"."}, {"L"}):
+        return None
+    return "open" if gaps == {"."} else "filled"
+
+
+@pytest.mark.parametrize("weather_code", sorted(SUPPORTED_WEATHER_CODES))
+@pytest.mark.parametrize("is_day", [True, False])
+def test_only_freezing_weather_carries_a_glinting_snowflake_in_the_bottom_right_corner(
+    weather_code: int, is_day: bool
+) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+
+    states = {_corner_flake(icon) for icon in cycle}
+    assert states == ({"open", "filled"} if weather_code in FREEZING_CODES else {None})
+
+
+@pytest.mark.parametrize("weather_code", STROKE_CODES)
 @pytest.mark.parametrize("is_day", [True, False])
 def test_rain_falls_as_moving_down_left_strokes(weather_code: int, is_day: bool) -> None:
     symbol = classify_weather_code(weather_code)
@@ -443,18 +586,74 @@ def test_rain_falls_as_moving_down_left_strokes(weather_code: int, is_day: bool)
     assert len({frozenset(stroke) for stroke in strokes}) > 1
 
 
+def _snowflake_x(icon: tuple[str, ...]) -> int | None:
+    """The left edge of the five-by-five snowflake under the cloud."""
+    return next((x for x in range(ICON_WIDTH - 4) if _shows(icon, BIG_FLAKE, x, 5)), None)
+
+
 @pytest.mark.parametrize("weather_code", SNOW_CODES)
 @pytest.mark.parametrize("is_day", [True, False])
-def test_snow_falls_straight_down_in_at_least_three_columns(weather_code: int, is_day: bool) -> None:
+def test_snow_shows_a_twinkling_snowflake_under_the_cloud(weather_code: int, is_day: bool) -> None:
     symbol = classify_weather_code(weather_code)
     cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
 
-    flake_columns = {x for icon in cycle for y in range(5, 10) for x in range(9) if _lit(icon, x, y)}
-    assert len(flake_columns) >= 3
-    first_positions = {(x, y) for y in range(5, 10) for x in range(9) if _lit(cycle[0], x, y)}
-    second_positions = {(x, y) for y in range(5, 10) for x in range(9) if _lit(cycle[1], x, y)}
-    assert first_positions != second_positions
-    assert {x for x, _y in first_positions} == {x for x, _y in second_positions}
+    places = {_snowflake_x(icon) for icon in cycle}
+    assert len(places) == 1 and None not in places
+    flake_x = places.pop()
+    assert {icon[5][flake_x + 2] for icon in cycle} == {"L", "#"}  # the tips dim and light up
+    assert {icon[7][flake_x + 2] for icon in cycle} == {"#"}  # the heart stays bright
+
+
+@pytest.mark.parametrize("weather_code", SNOW_CODES)
+@pytest.mark.parametrize("is_day", [True, False])
+def test_single_flakes_fall_straight_down_beside_the_snowflake(weather_code: int, is_day: bool) -> None:
+    symbol = classify_weather_code(weather_code)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+    flake_x = _snowflake_x(cycle[0])
+    assert flake_x is not None
+    beside = [
+        {
+            (x, y)
+            for y in range(5, ICON_HEIGHT)
+            for x in range(ICON_WIDTH)
+            if _lit(icon, x, y) and not flake_x <= x < flake_x + 5
+        }
+        for icon in cycle
+    ]
+
+    assert all(beside)
+    assert all(x < flake_x - 1 or x > flake_x + 5 for flakes in beside for x, _y in flakes)
+    moved = 0
+    for now, later in zip(beside, beside[1:] + beside[:1], strict=True):
+        if later != now:
+            moved += 1
+            assert {(x, 5 + (y - 4) % 5) for x, y in now} == later  # one row down, around the bottom
+    assert moved
+
+
+@pytest.mark.parametrize(("light_code", "heavy_code"), [(71, 73), (73, 75), (85, 86)])
+def test_heavier_snow_has_more_single_flakes(light_code: int, heavy_code: int) -> None:
+    def lit(weather_code: int) -> int:
+        icon = weather_icon(classify_weather_code(weather_code), is_day=True, frame_index=0)
+        return sum(_lit(icon, x, y) for y in range(5, ICON_HEIGHT) for x in range(ICON_WIDTH))
+
+    assert lit(light_code) < lit(heavy_code)
+
+
+@pytest.mark.parametrize("is_day", [True, False])
+def test_snow_grains_fall_straight_down_as_dim_dots_in_three_columns(is_day: bool) -> None:
+    symbol = classify_weather_code(SNOW_GRAINS_CODE)
+    cycle = [weather_icon(symbol, is_day=is_day, frame_index=index) for index in range(ICON_FRAMES)]
+
+    grains = [
+        {(x, y) for y in range(5, ICON_HEIGHT) for x in range(ICON_WIDTH) if _lit(icon, x, y)}
+        for icon in cycle
+    ]
+    assert {icon[y][x] for icon, frame in zip(cycle, grains, strict=True) for x, y in frame} == {"L"}
+    assert all(len({x for x, _y in frame}) == 3 for frame in grains)
+    assert grains[0] != grains[1]
+    assert {x for x, _y in grains[0]} == {x for x, _y in grains[1]}
+    assert all(_snowflake_x(icon) is None for icon in cycle)
 
 
 @pytest.mark.parametrize("weather_code", THUNDER_CODES)
