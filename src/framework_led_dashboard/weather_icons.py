@@ -287,9 +287,11 @@ def weather_icon(symbol: WeatherSymbol, *, is_day: bool, frame_index: int) -> Ic
     return WeatherIconArtist(Scene(symbol, is_day, frame_index % ICON_FRAMES)).draw()
 
 
-def draw_weather_icon(frame: Frame, weather_code: int, *, is_day: bool, frame_index: int) -> None:
+def draw_weather_icon(
+    frame: Frame, weather_code: int, *, is_day: bool, frame_index: int, top: int = 0
+) -> None:
     icon = weather_icon(classify_weather_code(weather_code), is_day=is_day, frame_index=frame_index)
     for y, row in enumerate(icon):
         for x, pixel in enumerate(row):
             if pixel in ICON_INTENSITIES:
-                frame.set_pixel(x, y, ICON_INTENSITIES[pixel])
+                frame.set_pixel(x, top + y, ICON_INTENSITIES[pixel])

@@ -2,7 +2,7 @@
 
 StatusNotifierItem hosts (KDE Plasma, GNOME's AppIndicator extension, Cinnamon, ...) draw the
 menu themselves from this tree, so it can only hold standard items: labels, check marks,
-radio lists and submenus. The settings window has the full controls.
+radio lists and submenus. It keeps the quick controls; the settings window has the rest.
 
 Item ids are fixed by position, so a host that caches them stays right after an update.
 """
@@ -13,8 +13,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from .bar_sources import BAR_SLOT_NAMES, BAR_SOURCES
-from .control import DisplaySettings, bars_side
+from .control import DisplaySettings
 
 BRIGHTNESS_STEPS = (5, 10, 20, 30, 40, 50, 60, 80, 100)
 
@@ -22,21 +21,15 @@ UNREACHABLE_ID = 1
 POWER_ID = 2
 BRIGHTNESS_ID = 3
 SWAP_ID = 4
-BARS_TITLE_ID = 6
-BAR_IDS = (7, 8, 9)
-CPU_ALERT_ID = 11
 SETTINGS_ID = 12
 QUIT_ID = 14
 _BRIGHTNESS_STEP_BASE = 100
-_BAR_SOURCE_BASE = 200
 
 
 class MenuActions(Protocol):
     def set_enabled(self, enabled: bool) -> None: ...
     def set_brightness(self, percent: int) -> None: ...
     def set_swap(self, swapped: bool) -> None: ...
-    def set_bar(self, slot: int, key: str) -> None: ...
-    def open_cpu_alert(self) -> None: ...
     def open_settings(self) -> None: ...
     def quit(self) -> None: ...
 
@@ -114,15 +107,6 @@ def build_menu(settings: DisplaySettings | None, actions: MenuActions) -> MenuIt
             action=lambda: actions.set_swap(not settings.swap_panels),
         ),
         MenuItem(5, separator=True),
-        MenuItem(BARS_TITLE_ID, f"{bars_side(settings).capitalize()} panel bars", enabled=False),
-        *(_bar_menu(slot, key, actions, reachable) for slot, key in enumerate(settings.bars)),
-        MenuItem(10, separator=True),
-        MenuItem(
-            CPU_ALERT_ID,
-            f"CPU alert: {settings.cpu_alert_celsius:g} °C…",
-            enabled=reachable,
-            action=actions.open_cpu_alert,
-        ),
         MenuItem(SETTINGS_ID, "Settings…", action=actions.open_settings),
         MenuItem(13, separator=True),
         MenuItem(QUIT_ID, "Quit tray", action=actions.quit),
@@ -150,21 +134,3 @@ def _brightness_menu(
         children=steps,
     )
 
-
-def _bar_menu(slot: int, current: str, actions: MenuActions, reachable: bool) -> MenuItem:
-    sources = tuple(
-        MenuItem(
-            _BAR_SOURCE_BASE + slot * 20 + index,
-            source.label,
-            toggle="radio",
-            checked=key == current,
-            action=lambda key=key: actions.set_bar(slot, key),
-        )
-        for index, (key, source) in enumerate(BAR_SOURCES.items())
-    )
-    return MenuItem(
-        BAR_IDS[slot],
-        f"{BAR_SLOT_NAMES[slot]}: {BAR_SOURCES[current].label}",
-        enabled=reachable,
-        children=sources,
-    )

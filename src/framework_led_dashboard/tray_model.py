@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from .bar_sources import BAR_SOURCES
-from .control import DisplaySettings, bars_side
+from .control import DisplaySettings
 
 # Desktops whose panel shows classic X11 (XEmbed) tray icons natively. There the tray keeps its
 # GTK popup with a real switch and slider; everywhere else it uses StatusNotifierItem.
 XEMBED_DESKTOPS = frozenset({"XFCE", "MATE", "X-CINNAMON", "CINNAMON", "LXDE"})
 BACKENDS = ("xembed", "sni", "none")
+SWAP_HINT = (
+    "Each panel shows the other one's widgets.\n"
+    "Also puts things right if the panels were detected the wrong way round."
+)
 
 
 def choose_backend(env: Mapping[str, str], *, watcher_present: bool) -> str:
@@ -37,9 +40,10 @@ def tray_summary(settings: DisplaySettings | None) -> tuple[str, str, str]:
     if settings is None:
         return "unreachable", "LED Matrix", "The dashboard is not running"
     state = "on" if settings.enabled else "off"
-    sources = ", ".join(BAR_SOURCES[key].label for key in settings.bars)
+    sound = "microphone" if settings.audio_source == "microphone" else "system sound"
+    swapped = ", panels swapped" if settings.swap_panels else ""
     return (
         state,
         f"LED Matrix: {state}, brightness {settings.brightness_percent} %",
-        f"Bars on the {bars_side(settings)} panel: {sources}",
+        f"Equalizer: {sound}{swapped}",
     )

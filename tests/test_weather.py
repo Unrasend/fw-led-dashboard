@@ -190,7 +190,9 @@ def test_timezone_city_is_geocoded_with_open_meteo(tmp_path: Path) -> None:
         requested_urls.append(url)
         return {"results": [{"latitude": 50.0755, "longitude": 14.4378}]}
 
-    city = timezone_city(timezone_file=timezone_file, localtime_file=tmp_path / "missing")
+    city = timezone_city(
+        timezone_file=timezone_file, localtime_file=tmp_path / "missing", environ={}
+    )
     location = OpenMeteoGeocoder(fetch_json=fetch_json).lookup_city(city)
 
     assert city == "Prague"
@@ -517,3 +519,19 @@ def _probe_name(command: tuple[str, ...]) -> str:
     if "route" in command:
         return "route"
     return "link"
+
+
+@pytest.mark.parametrize(
+    ("tz", "city"),
+    [("Europe/Prague", "Prague"), (":America/New_York", "New York"), ("UTC", None), ("", "Berlin"),
+     ("/usr/share/zoneinfo/Asia/Tokyo", "Berlin")],
+)
+def test_timezone_city_prefers_a_zone_named_in_tz(tmp_path: Path, tz: str, city: str | None) -> None:
+    timezone_file = tmp_path / "timezone"
+    timezone_file.write_text("Europe/Berlin\n", encoding="utf-8")
+
+    found = timezone_city(
+        timezone_file=timezone_file, localtime_file=tmp_path / "missing", environ={"TZ": tz}
+    )
+
+    assert found == city

@@ -4,10 +4,11 @@
 
 rewrites docs/demo-data.js; tests/test_demo_page.py fails while it is out of date.
 
-The page composes each panel from layers that never overlap on the hardware either: the
-right panel is its text (outside and CPU temperature) plus the weather icon in rows 0-9,
-both panels add the equalizer in rows 23-33. docs/panel.js draws the equalizer with the
-same rule as equalizer.py; the test checks the composition against the real renderers.
+The page shows the default layout (layout.DEFAULT_LAYOUT) and composes each panel from layers
+that never overlap on the hardware either: the right panel is its text (GPU and CPU
+temperature) plus the weather icon in rows 0-9, both panels add the equalizer in rows 23-33.
+docs/panel.js draws the equalizer with the same rule as equalizer.py; the test checks the
+composition against the real renderers.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from pathlib import Path
 
 from framework_led_dashboard import equalizer
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from framework_led_dashboard.left_panel import render_left_panel
-from framework_led_dashboard.right_panel import render_right_panel
+from framework_led_dashboard.layout import DEFAULT_LAYOUT, placed
+from framework_led_dashboard.panel_render import PanelData, render_panel
 from framework_led_dashboard.scheduler import weather_frame_index
 from framework_led_dashboard.system_metrics import SystemMetrics
 from framework_led_dashboard.weather import WeatherReading
@@ -100,13 +101,45 @@ def metrics_at(step: int) -> tuple[SystemMetrics, float]:
     return SystemMetrics(battery_percent=78, cpu_percent=cpu, ram_used_percent=ram), temperature
 
 
-def right_text_layer(cpu_temperature_c: float) -> FramePixels:
-    full = render_right_panel(
-        cpu_temperature_c=cpu_temperature_c,
-        weather=WeatherReading(temperature_c=OUTSIDE_TEMPERATURE_C, weather_code=0, is_day=True),
-    ).snapshot()
+def gpu_temperature_at(step: int) -> float:
+    """The GPU warms up and cools down more slowly than the CPU."""
+    return 46 + 6 * math.sin(2 * math.pi * (step - 6) / TIMELINE_STEPS)
+
+
+def panel_data(step: int, *, weather_code: int = 0, is_day: bool = True) -> PanelData:
+    metrics, cpu_temperature = metrics_at(step)
+    return PanelData(
+        metrics=metrics,
+        cpu_temperature_c=cpu_temperature,
+        gpu_temperature_c=gpu_temperature_at(step),
+        weather=WeatherReading(
+            temperature_c=OUTSIDE_TEMPERATURE_C, weather_code=weather_code, is_day=is_day
+        ),
+    )
+
+
+def left_base(step: int) -> FramePixels:
+    """The left panel without its equalizer: outside temperature, bars and their line."""
+    return render_panel(DEFAULT_LAYOUT.left, panel_data(step)).snapshot()
+
+
+def right_text_layer(step: int) -> FramePixels:
+    full = render_panel(DEFAULT_LAYOUT.right, panel_data(step)).snapshot()
     blank = tuple(0 for _ in range(FRAME_WIDTH))
     return tuple(blank if y < ICON_HEIGHT else row for y, row in enumerate(full))
+
+
+def _equalizer_rows() -> tuple[int, int]:
+    """(top, rows) of the equalizer, which the page draws itself: the same on both panels."""
+    spots = {
+        (top, widget.height)
+        for side in (DEFAULT_LAYOUT.left, DEFAULT_LAYOUT.right)
+        for top, widget in placed(side)
+        if widget.kind == "equalizer"
+    }
+    if len(spots) != 1:
+        raise ValueError("the demo needs the equalizer in the same rows on both panels")
+    return spots.pop()
 
 
 def build() -> dict[str, object]:
@@ -114,9 +147,9 @@ def build() -> dict[str, object]:
         raise ValueError("every supported weather code needs a label")
     left, right = [], []
     for step in range(TIMELINE_STEPS):
-        metrics, cpu_temperature = metrics_at(step)
-        left.append(encode(render_left_panel(metrics).snapshot()))
-        right.append(encode(right_text_layer(cpu_temperature)))
+        left.append(encode(left_base(step)))
+        right.append(encode(right_text_layer(step)))
+    equalizer_top, equalizer_rows = _equalizer_rows()
     return {
         "frameWidth": FRAME_WIDTH,
         "frameHeight": FRAME_HEIGHT,
@@ -124,8 +157,8 @@ def build() -> dict[str, object]:
         "iconHeight": ICON_HEIGHT,
         "pixelValues": {char: value for value, char in PIXEL_CHARS.items()},
         "equalizer": {
-            "top": equalizer.EQUALIZER_TOP,
-            "rows": equalizer.EQUALIZER_ROWS,
+            "top": equalizer_top,
+            "rows": equalizer_rows,
             "body": equalizer.BODY_INTENSITY,
             "peak": equalizer.PEAK_INTENSITY,
         },

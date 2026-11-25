@@ -41,7 +41,7 @@ def test_tray_host_can_read_the_icon_and_drive_the_dashboard_through_the_menu() 
     assert report["service"].startswith("org.kde.StatusNotifierItem-")
     assert report["tooltip"] == [
         "LED Matrix: on, brightness 40 %",
-        "Bars on the left panel: Battery, CPU, RAM",
+        "Equalizer: microphone",
     ]
     assert report["pixmaps"] == [[size, size, size * size * 4] for size in (22, 32, 48)]
     assert report["menu_path"] == "/MenuBar"

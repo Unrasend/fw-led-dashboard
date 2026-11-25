@@ -3,9 +3,12 @@
 Protocol: one JSON object per line, one request per connection.
   {"command": "status"}
   {"command": "set", "brightness_percent": 60, "enabled": false}   (every field optional)
-Settable fields: brightness_percent, enabled, bars (3 source names), swap_panels,
-cpu_alert_celsius.
-Answer: {"ok": true, <every field>} or {"ok": false, "error": "..."}.
+  {"command": "frames"}
+Settable fields: brightness_percent, enabled, swap_panels, cpu_alert_celsius, layout (see
+layout.py), audio_source ("microphone" or "system").
+Answer: {"ok": true, <every field>} or {"ok": false, "error": "..."}; for "frames",
+{"ok": true, "left": "<hex>", "right": "<hex>"}: what each physical panel shows now, 34 rows of
+9 pixels, one byte per pixel, rendered even while the panels are off.
 """
 
 from __future__ import annotations
@@ -15,21 +18,25 @@ import logging
 import os
 import socket
 import threading
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .bar_sources import DEFAULT_BARS, validate_bars
+from .audio import AUDIO_SOURCES
 from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
+from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
+from .layout import DEFAULT_LAYOUT, Layout, Widget, default_layout, layout_from_json
 from .scheduler import LOGGER
 
-MAX_MESSAGE_BYTES = 4096
-SOCKET_NAME = "framework-led-dashboard.sock"
+MAX_MESSAGE_BYTES = 16384
+# The socket sits in a folder of its own, so a container can be given just that folder.
+SOCKET_DIRECTORY = "framework-led-dashboard"
+SOCKET_NAME = "control.sock"
 CONNECTION_TIMEOUT_SECONDS = 1.0
 
 
 SETTABLE_FIELDS = frozenset(
-    {"brightness_percent", "enabled", "bars", "swap_panels", "cpu_alert_celsius"}
+    {"brightness_percent", "enabled", "swap_panels", "cpu_alert_celsius", "layout", "audio_source"}
 )
 DEFAULT_CPU_ALERT_CELSIUS = 120
 
@@ -42,9 +49,10 @@ class ControlError(OSError):
 class DisplaySettings:
     brightness_percent: int
     enabled: bool = True
-    bars: tuple[str, ...] = DEFAULT_BARS
-    swap_panels: bool = False  # bars on the right panel, weather on the left
+    swap_panels: bool = False  # each panel shows the other one's widgets
     cpu_alert_celsius: float = DEFAULT_CPU_ALERT_CELSIUS  # the CPU temperature blinks from here
+    layout: Layout = DEFAULT_LAYOUT
+    audio_source: str = "microphone"  # what the equalizer shows: microphone or system sound
 
     def __post_init__(self) -> None:
         brightness = self.brightness_percent
@@ -54,9 +62,6 @@ class DisplaySettings:
             raise ValueError("brightness_percent must be an integer between 0 and 100")
         if not isinstance(self.enabled, bool):
             raise TypeError("enabled must be true or false")
-        if not isinstance(self.bars, tuple) or not all(isinstance(key, str) for key in self.bars):
-            raise TypeError("bars must be a tuple of source names")
-        validate_bars(self.bars)
         if not isinstance(self.swap_panels, bool):
             raise TypeError("swap_panels must be true or false")
         alert = self.cpu_alert_celsius
@@ -67,23 +72,53 @@ class DisplaySettings:
                 f"cpu_alert_celsius must be between {CPU_ALERT_MIN_CELSIUS} and "
                 f"{CPU_ALERT_MAX_CELSIUS}"
             )
+        if not isinstance(self.layout, Layout):
+            raise TypeError("layout must be a Layout")
+        if self.audio_source not in AUDIO_SOURCES:
+            raise ValueError(f"audio_source must be one of {', '.join(AUDIO_SOURCES)}")
+
+    def widgets_on(self, side: str) -> tuple[Widget, ...]:
+        """The widgets the physical panel on `side` shows (the other side's when swapped)."""
+        if self.swap_panels:
+            side = "right" if side == "left" else "left"
+        return self.layout.side(side)
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "brightness_percent": self.brightness_percent,
+            "enabled": self.enabled,
+            "swap_panels": self.swap_panels,
+            "cpu_alert_celsius": self.cpu_alert_celsius,
+            "layout": self.layout.to_json(),
+            "audio_source": self.audio_source,
+        }
 
 
-def bars_side(settings: DisplaySettings) -> str:
-    """The panel that shows the bars: "left", or "right" when the panels are swapped."""
-    return "right" if settings.swap_panels else "left"
-
-
-def weather_side(settings: DisplaySettings) -> str:
-    """The panel that shows the weather and the CPU temperature."""
-    return "left" if settings.swap_panels else "right"
+def settings_from_json(raw: Mapping[str, object], defaults: DisplaySettings) -> DisplaySettings:
+    """Settings from JSON; a missing field keeps its default. A file saved before layouts
+    existed has "bars" instead: they go into the default layout."""
+    layout = defaults.layout
+    if "layout" in raw:
+        layout = layout_from_json(raw["layout"])
+    elif "bars" in raw:
+        bars = raw["bars"]
+        if not isinstance(bars, list):
+            raise TypeError("bars must be a list of 3 source names")
+        layout = default_layout(bars)
+    return DisplaySettings(
+        raw.get("brightness_percent", defaults.brightness_percent),  # type: ignore[arg-type]
+        enabled=raw.get("enabled", defaults.enabled),  # type: ignore[arg-type]
+        swap_panels=raw.get("swap_panels", defaults.swap_panels),  # type: ignore[arg-type]
+        cpu_alert_celsius=raw.get("cpu_alert_celsius", defaults.cpu_alert_celsius),  # type: ignore[arg-type]
+        layout=layout,
+        audio_source=raw.get("audio_source", defaults.audio_source),  # type: ignore[arg-type]
+    )
 
 
 def default_socket_path() -> Path:
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
-    if runtime and Path(runtime).is_absolute():
-        return Path(runtime) / SOCKET_NAME
-    return Path(f"/run/user/{os.getuid()}") / SOCKET_NAME
+    base = Path(runtime) if runtime and Path(runtime).is_absolute() else Path(f"/run/user/{os.getuid()}")
+    return base / SOCKET_DIRECTORY / SOCKET_NAME
 
 
 def default_settings_path() -> Path:
@@ -129,14 +164,11 @@ class SettingsStore:
             raw = json.loads(body)
             if not isinstance(raw, dict):
                 raise TypeError("expected a JSON object")
-            settings = DisplaySettings(
-                raw["brightness_percent"],
-                raw["enabled"],
-                _bars_from_json(raw.get("bars")),
-                # Fields saved by an older version are missing: the config still decides.
-                raw.get("swap_panels", default_swap_panels),
-                raw.get("cpu_alert_celsius", default_cpu_alert_celsius),
-            )
+            missing = {"brightness_percent", "enabled"} - set(raw)
+            if missing:
+                raise KeyError(", ".join(sorted(missing)))
+            # Fields saved by an older version are missing: the config still decides.
+            settings = settings_from_json(raw, settings)
         except FileNotFoundError:
             pass
         except (OSError, ValueError, TypeError, KeyError) as error:
@@ -152,21 +184,20 @@ class SettingsStore:
         *,
         brightness_percent: int | None = None,
         enabled: bool | None = None,
-        bars: tuple[str, ...] | None = None,
         swap_panels: bool | None = None,
         cpu_alert_celsius: float | None = None,
+        layout: Layout | None = None,
+        audio_source: str | None = None,
     ) -> DisplaySettings:
-        changes: dict[str, object] = {}
-        if brightness_percent is not None:
-            changes["brightness_percent"] = brightness_percent
-        if enabled is not None:
-            changes["enabled"] = enabled
-        if bars is not None:
-            changes["bars"] = bars
-        if swap_panels is not None:
-            changes["swap_panels"] = swap_panels
-        if cpu_alert_celsius is not None:
-            changes["cpu_alert_celsius"] = cpu_alert_celsius
+        given = {
+            "brightness_percent": brightness_percent,
+            "enabled": enabled,
+            "swap_panels": swap_panels,
+            "cpu_alert_celsius": cpu_alert_celsius,
+            "layout": layout,
+            "audio_source": audio_source,
+        }
+        changes = {name: value for name, value in given.items() if value is not None}
         with self._lock:
             previous = self._settings
             updated = replace(previous, **changes)
@@ -178,12 +209,14 @@ class SettingsStore:
             self._logger.info("display turned %s", "on" if updated.enabled else "off")
         if updated.brightness_percent != previous.brightness_percent:
             self._logger.debug("display brightness %d%%", updated.brightness_percent)
-        if updated.bars != previous.bars:
-            self._logger.info("bars: %s", ", ".join(updated.bars))
         if updated.swap_panels != previous.swap_panels:
-            self._logger.info("bars on the %s panel", bars_side(updated))
+            self._logger.info("panels %s", "swapped" if updated.swap_panels else "not swapped")
         if updated.cpu_alert_celsius != previous.cpu_alert_celsius:
             self._logger.info("CPU temperature alert at %g °C", updated.cpu_alert_celsius)
+        if updated.layout != previous.layout:
+            self._logger.info("layout: %s", describe_layout(updated.layout))
+        if updated.audio_source != previous.audio_source:
+            self._logger.info("equalizer source: %s", updated.audio_source)
         return updated
 
     def _save(self, settings: DisplaySettings) -> None:
@@ -192,13 +225,25 @@ class SettingsStore:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = self._path.with_suffix(f"{self._path.suffix}.tmp")
-            temporary.write_text(json.dumps(asdict(settings)), encoding="utf-8")
+            temporary.write_text(json.dumps(settings.to_json()), encoding="utf-8")
             temporary.replace(self._path)
         except OSError as error:
             self._logger.warning("could not save display settings to %s: %s", self._path, error)
 
 
-def handle_request(store: SettingsStore, request: object) -> dict[str, object]:
+def describe_layout(layout: Layout) -> str:
+    return "; ".join(
+        f"{side} " + ", ".join(widget.label.lower() for widget in layout.side(side))
+        for side in ("left", "right")
+    )
+
+
+FrameSource = Callable[[], Mapping[str, FramePixels]]
+
+
+def handle_request(
+    store: SettingsStore, request: object, *, frames: FrameSource | None = None
+) -> dict[str, object]:
     if not isinstance(request, dict):
         return _error("request must be a JSON object")
     command = request.get("command")
@@ -209,19 +254,36 @@ def handle_request(store: SettingsStore, request: object) -> dict[str, object]:
             unknown = set(request) - {"command", *SETTABLE_FIELDS}
             if unknown:
                 return _error(f"unknown fields: {', '.join(sorted(unknown))}")
-            bars = request.get("bars")
+            layout = request.get("layout")
             settings = store.update(
                 brightness_percent=request.get("brightness_percent"),
                 enabled=request.get("enabled"),
-                bars=None if bars is None else _bars_from_json(bars),
                 swap_panels=request.get("swap_panels"),
                 cpu_alert_celsius=request.get("cpu_alert_celsius"),
+                layout=None if layout is None else layout_from_json(layout),
+                audio_source=request.get("audio_source"),
             )
+        elif command == "frames" and frames is not None:
+            shown = frames()
+            return {"ok": True, **{side: encode_frame(shown[side]) for side in ("left", "right")}}
         else:
-            return _error("command must be 'status' or 'set'")
+            return _error("command must be 'status', 'set' or 'frames'")
     except (TypeError, ValueError) as error:
         return _error(str(error))
-    return {"ok": True, **asdict(settings)}
+    return {"ok": True, **settings.to_json()}
+
+
+def encode_frame(frame: FramePixels) -> str:
+    return bytes(value for row in frame for value in row).hex()
+
+
+def decode_frame(text: str) -> FramePixels:
+    data = bytes.fromhex(text)
+    if len(data) != FRAME_WIDTH * FRAME_HEIGHT:
+        raise ValueError(f"a frame has {FRAME_WIDTH * FRAME_HEIGHT} pixels, got {len(data)}")
+    return tuple(
+        tuple(data[row * FRAME_WIDTH : (row + 1) * FRAME_WIDTH]) for row in range(FRAME_HEIGHT)
+    )
 
 
 class ControlServer:
@@ -232,10 +294,12 @@ class ControlServer:
         store: SettingsStore,
         *,
         path: Path,
+        frames: FrameSource | None = None,
         accept_timeout_seconds: float = 0.5,
         logger: logging.Logger = LOGGER,
     ) -> None:
         self._store = store
+        self._frames = frames
         self._path = path
         self._accept_timeout = accept_timeout_seconds
         self._logger = logger
@@ -244,6 +308,7 @@ class ControlServer:
     def open(self) -> None:
         if _socket_answers(self._path):
             raise ControlError(f"another dashboard is already listening on {self._path}")
+        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._path.unlink(missing_ok=True)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -266,7 +331,9 @@ class ControlServer:
         with connection:
             connection.settimeout(CONNECTION_TIMEOUT_SECONDS)
             try:
-                response = handle_request(self._store, _read_message(connection))
+                response = handle_request(
+                    self._store, _read_message(connection), frames=self._frames
+                )
             except ValueError as error:
                 response = _error(str(error))
             except OSError as error:
@@ -298,31 +365,42 @@ class ControlClient:
         self._timeout = timeout_seconds
 
     def status(self) -> DisplaySettings:
-        return self._request({"command": "status"})
+        return self._settings(self._request({"command": "status"}))
 
     def set(
         self,
         *,
         brightness_percent: int | None = None,
         enabled: bool | None = None,
-        bars: Sequence[str] | None = None,
         swap_panels: bool | None = None,
         cpu_alert_celsius: float | None = None,
+        layout: Layout | None = None,
+        audio_source: str | None = None,
     ) -> DisplaySettings:
         request: dict[str, object] = {"command": "set"}
         if brightness_percent is not None:
             request["brightness_percent"] = brightness_percent
         if enabled is not None:
             request["enabled"] = enabled
-        if bars is not None:
-            request["bars"] = list(bars)
         if swap_panels is not None:
             request["swap_panels"] = swap_panels
         if cpu_alert_celsius is not None:
             request["cpu_alert_celsius"] = cpu_alert_celsius
-        return self._request(request)
+        if layout is not None:
+            request["layout"] = layout.to_json()
+        if audio_source is not None:
+            request["audio_source"] = audio_source
+        return self._settings(self._request(request))
 
-    def _request(self, request: dict[str, object]) -> DisplaySettings:
+    def frames(self) -> dict[str, FramePixels]:
+        """What the left and the right panel show now."""
+        response = self._request({"command": "frames"})
+        try:
+            return {side: decode_frame(response[side]) for side in ("left", "right")}  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ControlError(f"invalid answer from dashboard: {error}") from error
+
+    def _request(self, request: dict[str, object]) -> dict[str, object]:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self._timeout)
@@ -338,24 +416,14 @@ class ControlClient:
             raise ControlError("invalid answer from dashboard: expected a JSON object")
         if response.get("ok") is not True:
             raise ControlError(str(response.get("error", "request failed")))
+        return response
+
+    @staticmethod
+    def _settings(response: dict[str, object]) -> DisplaySettings:
         try:
-            return DisplaySettings(
-                response["brightness_percent"],
-                response["enabled"],
-                _bars_from_json(response["bars"]),
-                response["swap_panels"],
-                response["cpu_alert_celsius"],
-            )
+            return settings_from_json(response, DisplaySettings(0))
         except (KeyError, TypeError, ValueError) as error:
             raise ControlError(f"invalid answer from dashboard: {error}") from error
-
-
-def _bars_from_json(value: object) -> tuple[str, ...]:
-    if value is None:
-        return DEFAULT_BARS
-    if not isinstance(value, list):
-        raise TypeError("bars must be a list of 3 source names")
-    return tuple(value)
 
 
 def _socket_answers(path: Path) -> bool:

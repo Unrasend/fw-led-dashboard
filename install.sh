@@ -4,7 +4,10 @@
 #   ./install.sh               install or update from this checkout (safe to re-run)
 #   ./install.sh --yes         ...and install missing system packages without asking
 #   ./install.sh --no-packages ...and never touch system packages
+#   ./install.sh --docker      run the dashboard in a Docker container instead (optional)
+#   ./install.sh --native      back from Docker to the plain user service
 #   ./install.sh --uninstall   remove the service, tray, menu entry and program; keep settings
+# Without --docker or --native an update keeps the variant that is installed.
 #
 # Without a checkout - piped from the web - it first downloads and unpacks release $VERSION:
 #   wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
@@ -22,6 +25,9 @@
 #   ~/.config/systemd/user/framework-led-dashboard.service   enabled and (re)started
 #   ~/.config/autostart/framework-led-dashboard-tray.desktop  tray icon at login
 #   ~/.local/share/applications, ~/.local/share/icons         "LED Matrix Dashboard" settings
+# With --docker the service runs the image framework-led-dashboard:$VERSION, built here from
+# the Dockerfile, through bin/framework-led-dashboard-docker; the tray and the settings window
+# stay on the desktop.
 # An older inputmodule-rs visualizer service (framework-matrix.service), if present, is
 # disabled - never deleted - because only one program can own the panels.
 set -euo pipefail
@@ -44,12 +50,15 @@ BIN_DIR="$DATA_DIR/bin"
 SRC_DIR="$DATA_DIR/src"
 OLD_VENV="$DATA_DIR/venv"  # versions before 1.3 installed into a venv
 BIN="$BIN_DIR/framework-led-dashboard"
+DOCKER_BIN="$BIN_DIR/framework-led-dashboard-docker"
+DOCKER_IMAGE=framework-led-dashboard
 SERVICE=framework-led-dashboard.service
 OLD_SERVICE=framework-matrix.service
 GNOME_EXTENSION=appindicatorsupport@rgcjonas.gmail.com
 PYTHON=${PYTHON:-python3}
 ASSUME_YES=0
 SKIP_PACKAGES=0
+MODE=""  # docker or native; empty keeps the installed variant (native on a first install)
 
 # Empty when the script is piped into bash: there is no checkout to install from.
 SCRIPT_PATH=${BASH_SOURCE[0]:-}
@@ -70,6 +79,8 @@ Install, update or remove the Framework LED Matrix dashboard for the current use
   ./install.sh               install or update from this checkout (safe to re-run)
   ./install.sh --yes         ...and install missing system packages without asking
   ./install.sh --no-packages ...and never touch system packages
+  ./install.sh --docker      run the dashboard in a Docker container instead
+  ./install.sh --native      back from Docker to the plain user service
   ./install.sh --uninstall   remove the service, tray, menu entry and program; keep settings
 
 Without a checkout:
@@ -99,10 +110,10 @@ package_manager() {
 # packages_for MANAGER NEED - the distribution's package names for gtk, audio or gnome-tray.
 packages_for() {
     case "$1:$2" in
-        pacman:gtk) echo "python-gobject gtk3" ;;
-        apt:gtk) echo "python3-gi gir1.2-gtk-3.0" ;;
+        pacman:gtk) echo "python-gobject python-cairo gtk3" ;;
+        apt:gtk) echo "python3-gi python3-gi-cairo gir1.2-gtk-3.0" ;;
         dnf:gtk | rpm-ostree:gtk) echo "python3-gobject gtk3" ;;
-        zypper:gtk) echo "python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0" ;;
+        zypper:gtk) echo "python3-gobject python3-gobject-cairo python3-gobject-Gdk typelib-1_0-Gtk-3_0" ;;
         pacman:audio) echo "libpulse" ;;
         apt:audio | dnf:audio | rpm-ostree:audio | zypper:audio) echo "pulseaudio-utils" ;;
         *:gnome-tray) echo "gnome-shell-extension-appindicator" ;;
@@ -118,13 +129,16 @@ has_tray_host() {
     busctl --user --no-pager status org.kde.StatusNotifierWatcher >/dev/null 2>&1
 }
 
-# missing_needs - which of gtk, audio, gnome-tray this system lacks, one per line.
+# missing_needs - which of gtk, audio, gnome-tray this system lacks, one per line. In Docker
+# mode the container brings its own audio tools, so that need is not asked for.
 missing_needs() {
-    if ! "$PYTHON" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
-        >/dev/null 2>&1; then
+    # The settings window draws the panels with cairo, which PyGObject reaches through pycairo.
+    if ! "$PYTHON" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk
+gi.require_foreign("cairo")' >/dev/null 2>&1; then
         echo gtk
     fi
-    if ! command -v parec >/dev/null && ! command -v pw-record >/dev/null; then
+    if [[ "$MODE" != docker ]] && ! command -v parec >/dev/null \
+        && ! command -v pw-record >/dev/null; then
         echo audio
     fi
     if on_gnome && ! has_tray_host \
@@ -200,7 +214,7 @@ install_system_packages() {
     step "System packages"
     for need in "${needs[@]}"; do
         case "$need" in
-            gtk) note "- PyGObject and GTK 3: the tray icon and the settings window" ;;
+            gtk) note "- PyGObject with cairo and GTK 3: the tray icon and the settings window" ;;
             audio) note "- parec (PulseAudio tools): the equalizer" ;;
             gnome-tray) note "- GNOME's AppIndicator extension: GNOME has no tray without it" ;;
         esac
@@ -232,11 +246,51 @@ stop_tray() {
     pkill -f "^[^ ]*python[^ ]* $OLD_VENV/bin/framework-led-dashboard --tray\$" 2>/dev/null || true
 }
 
+# installed_mode - "docker" if the installed service runs the container, else "native".
+installed_mode() {
+    if grep -qs framework-led-dashboard-docker "$UNIT_DIR/$SERVICE"; then
+        echo docker
+    else
+        echo native
+    fi
+}
+
+# remove_docker_images [KEEP] - every framework-led-dashboard image but the tag KEEP.
+remove_docker_images() {
+    command -v docker >/dev/null || return 0
+    local image
+    docker image ls --format '{{.Repository}}:{{.Tag}}' "$DOCKER_IMAGE" 2>/dev/null \
+        | while read -r image; do
+            [[ "$image" == "$DOCKER_IMAGE:${1:-}" ]] || docker image rm "$image" >/dev/null 2>&1 || true
+        done
+}
+
+install_docker_image() {
+    step "Building the Docker image $DOCKER_IMAGE:$VERSION"
+    command -v docker >/dev/null || fail "docker is not installed; install it, or install without --docker"
+    docker info >/dev/null 2>&1 \
+        || fail "cannot reach Docker: is it running, and are you in the docker group?"
+    # The build only installs Alpine packages. The host's network spares it a VPN that blocks
+    # containers' DNS; the dashboard's own container gets a network of its own.
+    docker build --network host --tag "$DOCKER_IMAGE:$VERSION" \
+        --build-arg "VERSION=$VERSION" "$PROJECT_DIR" || fail "the Docker image did not build"
+    remove_docker_images "$VERSION"
+    sed "s|@VERSION@|$VERSION|" "$PROJECT_DIR/packaging/framework-led-dashboard-docker" \
+        >"$DOCKER_BIN.new"
+    chmod 755 "$DOCKER_BIN.new"
+    mv "$DOCKER_BIN.new" "$DOCKER_BIN"
+}
+
 uninstall() {
     step "Removing $SERVICE"
     systemctl --user disable --now "$SERVICE" 2>/dev/null || true
     rm -f "$UNIT_DIR/$SERVICE"
     systemctl --user daemon-reload
+    if command -v docker >/dev/null; then
+        docker rm --force framework-led-dashboard >/dev/null 2>&1 || true
+        docker network rm framework-led-dashboard >/dev/null 2>&1 || true
+        remove_docker_images
+    fi
     step "Removing the tray and the menu entry"
     stop_tray
     rm -f "$AUTOSTART_FILE" "$MENU_FILE" "$ICON_FILE"
@@ -325,6 +379,9 @@ install_desktop_entries() {
 }
 
 install_dashboard() {
+    local installed
+    installed=$(installed_mode)
+    MODE=${MODE:-$installed}
     step "Checking requirements"
     command -v systemctl >/dev/null || fail "systemd is required"
     command -v "$PYTHON" >/dev/null || fail "$PYTHON not found; install Python 3.11 or newer"
@@ -333,6 +390,9 @@ install_dashboard() {
     install_system_packages
 
     install_program
+    if [[ "$MODE" == docker ]]; then
+        install_docker_image
+    fi
 
     step "Configuration in $CONFIG_DIR"
     if [[ -f "$CONFIG_DIR/config.toml" ]]; then
@@ -358,11 +418,23 @@ install_dashboard() {
         systemctl --user disable --now framework-matrix.service
     fi
 
-    step "Installing and starting $SERVICE"
-    install -Dm644 "$PROJECT_DIR/packaging/framework-led-dashboard.service" "$UNIT_DIR/$SERVICE"
+    local unit=packaging/framework-led-dashboard.service
+    [[ "$MODE" == docker ]] && unit=packaging/framework-led-dashboard-docker.service
+    step "Installing and starting $SERVICE ($MODE)"
+    if [[ "$MODE" != "$installed" ]]; then
+        # Stop it with the unit that started it: the Docker one removes its container.
+        systemctl --user stop "$SERVICE" 2>/dev/null || true
+    fi
+    install -Dm644 "$PROJECT_DIR/$unit" "$UNIT_DIR/$SERVICE"
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE"
     systemctl --user restart "$SERVICE"
+    if [[ "$MODE" == native && "$installed" == docker ]]; then
+        rm -f "$DOCKER_BIN"
+        docker network rm framework-led-dashboard >/dev/null 2>&1 || true
+        remove_docker_images
+        note "removed the Docker variant"
+    fi
 
     install_desktop_entries
 
@@ -375,7 +447,7 @@ install_dashboard() {
     fi
     cat <<EOF
 
-Done. Settings: "LED Matrix Dashboard" in the application menu, or the tray icon
+Done ($MODE). Settings: "LED Matrix Dashboard" in the application menu, or the tray icon
       Logs:     journalctl --user -u $SERVICE -f
       Config:   $CONFIG_DIR/config.toml (then: systemctl --user restart $SERVICE)
       Update:   $update
@@ -391,6 +463,8 @@ main() {
             -h | --help) usage; return ;;
             -y | --yes) ASSUME_YES=1 ;;
             --no-packages) SKIP_PACKAGES=1 ;;
+            --docker) MODE=docker ;;
+            --native) MODE=native ;;
             *) fail "unknown option: $1 (see --help)" ;;
         esac
         shift

@@ -19,15 +19,18 @@ GuiRunner = Callable[[str], int]
 
 def _run_gui(mode: str) -> int:
     try:
-        from .tray import run_gui
+        if mode == "tray":
+            from .tray import run_tray as run
+        else:
+            from .settings_window import run_settings as run
     except (ImportError, ValueError) as error:
         print(
-            f"the tray and the settings window need GTK 3 and PyGObject ({error}); "
+            f"the tray and the settings window need GTK 3 and PyGObject with cairo ({error}); "
             "running install.sh again offers to install them",
             file=sys.stderr,
         )
         return 2
-    return run_gui(mode)
+    return run()
 
 
 def main(
@@ -62,7 +65,7 @@ def main(
     action.add_argument(
         "--settings",
         action="store_true",
-        help="open the settings window (in the running tray, if there is one)",
+        help="open the settings window: what each panel shows (raises it if it is open)",
     )
     action.add_argument(
         "--init-config",
@@ -140,7 +143,7 @@ def _init_config(template: Path, target: Path, *, panel_lister: PanelLister) -> 
         )
         return 2
     # On the Framework 16 this was calibrated on, the module on the higher hub port is the
-    # left one; the tray's "Swap panels" switch fixes it if another unit differs.
+    # left one; "Swap panels" in the tray or the settings fixes it if another unit differs.
     left, right = identities
     try:
         filled = fill_panel_identities(template.read_text(encoding="utf-8"), left=left, right=right)

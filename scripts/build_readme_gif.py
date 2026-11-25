@@ -18,9 +18,8 @@ import cairo
 from PIL import Image
 
 from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from framework_led_dashboard.left_panel import render_left_panel
-from framework_led_dashboard.right_panel import render_right_panel
-from framework_led_dashboard.weather import WeatherReading
+from framework_led_dashboard.layout import DEFAULT_LAYOUT
+from framework_led_dashboard.panel_render import render_panel
 
 OUTPUT = Path(__file__).resolve().parents[1] / "docs" / "preview.gif"
 
@@ -51,10 +50,14 @@ MODULE_EDGE = (0x24 / 255, 0x27 / 255, 0x2B / 255)
 MUTED = (0x9D / 255, 0x9A / 255, 0x94 / 255)
 LED = (1.0, 247 / 255, 232 / 255)
 
-LEFT_CALLOUTS = ((10, ("battery · CPU · RAM",)), (28, ("microphone", "equalizer")))
+LEFT_CALLOUTS = (
+    (2.5, ("outside °",)),
+    (13, ("battery · CPU · RAM",)),
+    (28, ("sound", "equalizer")),
+)
 RIGHT_CALLOUTS = (
     (4.5, ("weather, animated",)),
-    (13, ("outside °",)),
+    (13, ("GPU °C",)),
     (19, ("CPU °C",)),
     (28, ("equalizer,", "mirrored")),
 )
@@ -106,17 +109,13 @@ def panels_at(index: int, levels: tuple[float, ...]) -> tuple[FramePixels, Frame
     # Ten one-second sensor samples spread over the demo's 40-sample wave: it loops too.
     second = index // FRAMES_PER_SECOND
     step = second * build_demo_data.TIMELINE_STEPS // LOOP_SECONDS
-    metrics, cpu_temperature = build_demo_data.metrics_at(step)
-    left = render_left_panel(metrics, spectrum=levels).snapshot()
-    right = render_right_panel(
-        cpu_temperature_c=cpu_temperature,
-        weather=WeatherReading(
-            temperature_c=build_demo_data.OUTSIDE_TEMPERATURE_C,
-            weather_code=WEATHER_CODE,
-            is_day=True,
-        ),
-        weather_frame=index * 2 // FRAMES_PER_SECOND,
+    data = build_demo_data.panel_data(step, weather_code=WEATHER_CODE)
+    left = render_panel(DEFAULT_LAYOUT.left, data, spectrum=levels, mirrored=True).snapshot()
+    right = render_panel(
+        DEFAULT_LAYOUT.right,
+        data,
         spectrum=levels,
+        weather_frame=index * 2 // FRAMES_PER_SECOND,
     ).snapshot()
     return left, right
 

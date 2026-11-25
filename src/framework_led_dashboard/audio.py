@@ -167,9 +167,12 @@ class SpectrumAnalyzer:
         """Levels for one window of signed 16-bit little-endian samples, as parec sends them."""
         if len(chunk) != 2 * self._window_size:
             raise ValueError(f"expected {2 * self._window_size} bytes, got {len(chunk)}")
-        samples = array("h", chunk)
-        if sys.byteorder == "big":
-            samples.byteswap()
+        return self.analyze_int16(pcm16_samples(chunk))
+
+    def analyze_int16(self, samples: Sequence[int]) -> Levels:
+        """Levels for one window of signed 16-bit sample values."""
+        if len(samples) != self._window_size:
+            raise ValueError(f"expected {self._window_size} samples, got {len(samples)}")
         return self._levels_from(
             _windowed_pairs(samples, self._even_pcm_weights, self._odd_pcm_weights)
         )
@@ -198,6 +201,43 @@ def _windowed_pairs(
     ]
 
 
+def pcm16_samples(chunk: bytes) -> array:
+    """Signed 16-bit little-endian PCM as sample values (interleaved if it is stereo)."""
+    samples = array("h", chunk)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return samples
+
+
+AUDIO_SOURCES = ("microphone", "system")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureRequest:
+    """What to capture: the default microphone, or the system sound (the default output's
+    monitor) as one channel or as left and right apart."""
+
+    source: str = "microphone"
+    channels: int = 1
+
+    def __post_init__(self) -> None:
+        if self.source not in AUDIO_SOURCES:
+            raise ValueError(f"audio source must be one of {', '.join(AUDIO_SOURCES)}")
+        if self.channels not in (1, 2):
+            raise ValueError("channels must be 1 or 2")
+
+
+@dataclass(frozen=True, slots=True)
+class Spectrum:
+    """Band levels for the left and the right module; the same tuple twice when mono."""
+
+    left: Levels
+    right: Levels
+
+    def side(self, side: str) -> Levels:
+        return self.left if side == "left" else self.right
+
+
 class CaptureProcess(Protocol):
     stdout: IO[bytes] | None
 
@@ -208,84 +248,138 @@ class CaptureProcess(Protocol):
     def wait(self, timeout: float | None = None) -> int: ...
 
 
-ProcessFactory = Callable[[], CaptureProcess]
+ProcessFactory = Callable[[CaptureRequest], CaptureProcess]
 Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
 
+# PipeWire: capture what the default output plays. Without a target the stream follows the
+# default output when it changes (headphones, HDMI).
+_PW_CAPTURE_SINK = "{ stream.capture.sink = true }"
 
-def parec_command(*, device: str | None, sample_rate: int) -> tuple[str, ...]:
-    command = ("parec", "--raw", "--format=s16le", f"--rate={sample_rate}", "--channels=1", "--latency-msec=40")
+
+def parec_command(
+    *, device: str | None, sample_rate: int, channels: int = 1
+) -> tuple[str, ...]:
+    command = (
+        "parec",
+        "--raw",
+        "--format=s16le",
+        f"--rate={sample_rate}",
+        f"--channels={channels}",
+        "--latency-msec=40",
+    )
     return command if device is None else (*command, f"--device={device}")
 
 
-def pw_record_command(*, device: str | None, sample_rate: int) -> tuple[str, ...]:
+def pw_record_command(
+    *,
+    device: str | None,
+    sample_rate: int,
+    channels: int = 1,
+    capture_sink: bool = False,
+) -> tuple[str, ...]:
     """PipeWire's own recorder: the same raw stream, for systems without parec."""
     command = (
         "pw-record",
         "--raw",
         "--format=s16",  # native byte order, little-endian on every Framework laptop
         f"--rate={sample_rate}",
-        "--channels=1",
+        f"--channels={channels}",
         "--latency=40ms",
     )
+    if capture_sink:
+        command = (*command, "-P", _PW_CAPTURE_SINK)
     return (*command, "-") if device is None else (*command, f"--target={device}", "-")
 
 
 def capture_command(
+    request: CaptureRequest = CaptureRequest(),
     *,
-    device: str | None,
     sample_rate: int,
     which: Callable[[str], str | None] = shutil.which,
 ) -> tuple[str, ...]:
-    """parec where it exists (PulseAudio, or PipeWire with its Pulse tools), else pw-record."""
-    if which("parec"):
-        return parec_command(device=device, sample_rate=sample_rate)
-    if which("pw-record"):
-        return pw_record_command(device=device, sample_rate=sample_rate)
+    """The microphone through parec where it exists (PulseAudio, or PipeWire with its Pulse
+    tools), else pw-record. The system sound through pw-record where it exists, because its
+    stream follows the default output; else parec on the default output's monitor."""
+    channels = request.channels
+    if request.source == "system":
+        if which("pw-record"):
+            return pw_record_command(
+                device=None, sample_rate=sample_rate, channels=channels, capture_sink=True
+            )
+        if which("parec"):
+            return parec_command(
+                device="@DEFAULT_MONITOR@", sample_rate=sample_rate, channels=channels
+            )
+    elif which("parec"):
+        return parec_command(device=None, sample_rate=sample_rate, channels=channels)
+    elif which("pw-record"):
+        return pw_record_command(device=None, sample_rate=sample_rate, channels=channels)
     raise FileNotFoundError("neither parec nor pw-record is installed")
 
 
-def _spawn_capture(device: str | None, sample_rate: int) -> CaptureProcess:
+def _spawn_capture(request: CaptureRequest) -> CaptureProcess:
     return subprocess.Popen(
-        capture_command(device=device, sample_rate=sample_rate),
+        capture_command(request, sample_rate=SAMPLE_RATE),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
 
 
-class MicrophoneSpectrum:
+class SoundSpectrum:
+    """Run parec or pw-record and keep the latest band levels; restart it when it stops.
+
+    Two channels are analysed apart (left and right module); one channel serves both.
+    """
+
     def __init__(
         self,
         *,
-        analyzer: SpectrumAnalyzer | None = None,
-        process_factory: ProcessFactory | None = None,
-        device: str | None = None,
+        analyzer_factory: Callable[[], SpectrumAnalyzer] = SpectrumAnalyzer,
+        process_factory: ProcessFactory = _spawn_capture,
         clock: Clock = time.monotonic,
         sleeper: Sleeper = time.sleep,
         stale_after_seconds: float = 1.0,
         restart_initial_seconds: float = 0.5,
         restart_max_seconds: float = 10.0,
     ) -> None:
-        self._analyzer = analyzer or SpectrumAnalyzer()
-        self._process_factory = process_factory or (lambda: _spawn_capture(device, SAMPLE_RATE))
+        self._analyzer_factory = analyzer_factory
+        self._process_factory = process_factory
         self._clock = clock
         self._sleeper = sleeper
         self._stale_after_seconds = stale_after_seconds
         self._restart_initial_seconds = restart_initial_seconds
         self._restart_max_seconds = restart_max_seconds
         self._lock = threading.Lock()
-        self._latest: Levels | None = None
+        self._latest: Spectrum | None = None
         self._updated_at = -math.inf
         self._running = False
+        self._generation = 0  # a capture thread that outlived stop() must not carry on
+        self._request: CaptureRequest | None = None
         self._process: CaptureProcess | None = None
         self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
+    @property
+    def request(self) -> CaptureRequest | None:
+        """What is being captured, or None while stopped."""
+        return self._request if self._running else None
+
+    def start(self, request: CaptureRequest = CaptureRequest()) -> None:
+        """Start capturing `request`; a capture of something else is stopped first."""
         if self._running:
-            return
+            if request == self._request:
+                return
+            self.stop()
+        self._request = request
         self._running = True
-        self._thread = threading.Thread(target=self._run, name="microphone-spectrum", daemon=True)
+        self._generation += 1
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(request, self._generation),
+            name="sound-spectrum",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -294,46 +388,64 @@ class MicrophoneSpectrum:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        with self._lock:
+            self._latest = None
+            self._updated_at = -math.inf
 
-    def levels(self) -> Levels | None:
+    def levels(self) -> Spectrum | None:
         with self._lock:
             if self._clock() - self._updated_at > self._stale_after_seconds:
                 return None
             return self._latest
 
-    def _run(self) -> None:
+    def _current(self, generation: int) -> bool:
+        return self._running and generation == self._generation
+
+    def _run(self, request: CaptureRequest, generation: int) -> None:
         failures = 0
-        while self._running:
+        while self._current(generation):
             try:
-                self._capture_until_exit()
+                self._capture_until_exit(request, generation)
                 failures = 0
             except (OSError, ValueError):
                 pass
-            if not self._running:
+            if not self._current(generation):
                 break
             failures += 1
             delay = min(self._restart_initial_seconds * 2 ** min(failures - 1, 16), self._restart_max_seconds)
             self._sleeper(delay)
 
-    def _capture_until_exit(self) -> None:
-        process = self._process_factory()
+    def _capture_until_exit(self, request: CaptureRequest, generation: int) -> None:
+        process = self._process_factory(request)
         self._process = process
         stream = process.stdout
         if stream is None:
             raise OSError("capture process has no stdout")
-        chunk_size = self._analyzer.window_size * 2
+        analyzers = [self._analyzer_factory() for _ in range(request.channels)]
+        chunk_size = analyzers[0].window_size * 2 * request.channels
         try:
-            while self._running:
+            while self._current(generation):
                 chunk = stream.read(chunk_size)
                 if len(chunk) < chunk_size:
                     raise OSError("capture stream ended")
-                self._publish(self._analyzer.analyze_pcm16(chunk))
+                if request.channels == 1:
+                    levels = analyzers[0].analyze_pcm16(chunk)
+                    self._publish(Spectrum(levels, levels), generation)
+                else:
+                    samples = pcm16_samples(chunk)
+                    left, right = analyzers
+                    spectrum = Spectrum(
+                        left.analyze_int16(samples[0::2]), right.analyze_int16(samples[1::2])
+                    )
+                    self._publish(spectrum, generation)
         finally:
             self._terminate()
 
-    def _publish(self, levels: Levels) -> None:
+    def _publish(self, spectrum: Spectrum, generation: int) -> None:
         with self._lock:
-            self._latest = levels
+            if not self._current(generation):
+                return
+            self._latest = spectrum
             self._updated_at = self._clock()
 
     def _terminate(self) -> None:

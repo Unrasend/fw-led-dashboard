@@ -5,8 +5,9 @@ import pytest
 from framework_led_dashboard.control import DisplaySettings
 from framework_led_dashboard.dbusmenu import (
     BRIGHTNESS_ID,
-    CPU_ALERT_ID,
     POWER_ID,
+    QUIT_ID,
+    SETTINGS_ID,
     SWAP_ID,
     UNREACHABLE_ID,
     build_menu,
@@ -28,12 +29,6 @@ class RecordingActions:
 
     def set_swap(self, swapped: bool) -> None:
         self.calls.append(("swap", swapped))
-
-    def set_bar(self, slot: int, key: str) -> None:
-        self.calls.append(("bar", (slot, key)))
-
-    def open_cpu_alert(self) -> None:
-        self.calls.append(("cpu_alert", None))
 
     def open_settings(self) -> None:
         self.calls.append(("settings", None))
@@ -77,9 +72,7 @@ def test_icon_rejects_unknown_states_and_tiny_sizes(state: str, size: int) -> No
 
 
 def test_menu_shows_the_current_settings_with_check_marks_and_radio_lists() -> None:
-    settings = DisplaySettings(
-        40, bars=("gpu", "cpu", "ram"), swap_panels=True, cpu_alert_celsius=95
-    )
+    settings = DisplaySettings(40, swap_panels=True, cpu_alert_celsius=95)
     menu = build_menu(settings, RecordingActions())
 
     assert menu.find(UNREACHABLE_ID) is None
@@ -88,10 +81,18 @@ def test_menu_shows_the_current_settings_with_check_marks_and_radio_lists() -> N
     brightness = menu.find(BRIGHTNESS_ID)
     assert brightness.label == "Brightness: 40 %"
     assert [step.label for step in brightness.children if step.checked] == ["40 %"]
-    labels = [item.label for item in menu.children]
-    assert "Right panel bars" in labels  # swapped: the bars are on the right
-    assert "Bar 1 (left): GPU" in labels
-    assert menu.find(CPU_ALERT_ID).label == "CPU alert: 95 °C…"
+
+
+def test_menu_keeps_only_the_quick_controls() -> None:
+    menu = build_menu(DisplaySettings(40), RecordingActions())
+
+    assert [item.label for item in menu.children if not item.separator] == [
+        "LED Matrix",
+        "Brightness: 40 %",
+        "Swap panels",
+        "Settings…",
+        "Quit tray",
+    ]
 
 
 def test_menu_items_call_the_matching_actions() -> None:
@@ -101,16 +102,15 @@ def test_menu_items_call_the_matching_actions() -> None:
     menu.find(POWER_ID).action()
     next(step for step in menu.find(BRIGHTNESS_ID).children if step.label == "80 %").action()
     menu.find(SWAP_ID).action()
-    bar_two = next(item for item in menu.children if item.label.startswith("Bar 2"))
-    next(source for source in bar_two.children if source.label == "Disk /").action()
-    menu.find(CPU_ALERT_ID).action()
+    menu.find(SETTINGS_ID).action()
+    menu.find(QUIT_ID).action()
 
     assert actions.calls == [
         ("enabled", False),
         ("brightness", 80),
         ("swap", True),
-        ("bar", (1, "disk")),
-        ("cpu_alert", None),
+        ("settings", None),
+        ("quit", None),
     ]
 
 
@@ -121,7 +121,7 @@ def test_menu_without_a_dashboard_says_so_and_disables_what_needs_it() -> None:
     assert (first.id, first.enabled) == (UNREACHABLE_ID, False)
     assert first.label == "Dashboard is not running"
     assert menu.find(POWER_ID).enabled is False
-    assert menu.find(CPU_ALERT_ID).enabled is False
+    assert menu.find(SWAP_ID).enabled is False
     assert next(item for item in menu.children if item.label == "Settings…").enabled is True
     assert next(item for item in menu.children if item.label == "Quit tray").enabled is True
 
@@ -129,7 +129,7 @@ def test_menu_without_a_dashboard_says_so_and_disables_what_needs_it() -> None:
 def test_menu_ids_are_unique_and_do_not_move_when_settings_change() -> None:
     first = build_menu(DisplaySettings(40), RecordingActions())
     second = build_menu(
-        DisplaySettings(77, enabled=False, bars=("disk", "swap", "gpu")), RecordingActions()
+        DisplaySettings(77, enabled=False, swap_panels=True), RecordingActions()
     )
 
     ids = [item.id for item in first.walk()]
@@ -177,10 +177,11 @@ def test_tray_backend_suits_the_desktop(env: dict[str, str], watcher: bool, back
     assert choose_backend(env, watcher_present=watcher) == backend
 
 
-def test_tray_summary_names_state_brightness_and_where_the_bars_are() -> None:
+def test_tray_summary_names_state_brightness_sound_and_swap() -> None:
     assert tray_summary(None) == ("unreachable", "LED Matrix", "The dashboard is not running")
     state, title, description = tray_summary(
-        DisplaySettings(55, enabled=False, bars=("cpu", "ram", "gpu"), swap_panels=True)
+        DisplaySettings(55, enabled=False, swap_panels=True, audio_source="system")
     )
     assert (state, title) == ("off", "LED Matrix: off, brightness 55 %")
-    assert description == "Bars on the right panel: CPU, RAM, GPU"
+    assert description == "Equalizer: system sound, panels swapped"
+    assert tray_summary(DisplaySettings(40))[2] == "Equalizer: microphone"

@@ -11,9 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from framework_led_dashboard.left_panel import render_left_panel
-from framework_led_dashboard.right_panel import render_right_panel
-from framework_led_dashboard.weather import WeatherReading
+from framework_led_dashboard.layout import DEFAULT_LAYOUT
+from framework_led_dashboard.panel_render import render_panel
 from framework_led_dashboard.weather_codes import SUPPORTED_WEATHER_CODES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,17 +81,14 @@ def _cases() -> list[dict[str, object]]:
 
 
 def _expected(case: dict[str, object]) -> tuple[list[int], list[int]]:
-    metrics, cpu_temperature = build_demo_data.metrics_at(case["step"])
-    left = render_left_panel(metrics, spectrum=case["levels"]).snapshot()
-    right = render_right_panel(
-        cpu_temperature_c=cpu_temperature,
-        weather=WeatherReading(
-            temperature_c=build_demo_data.OUTSIDE_TEMPERATURE_C,
-            weather_code=case["code"],
-            is_day=not case["night"],
-        ),
-        weather_frame=case["frame"],
-        spectrum=case["levels"],
+    data = build_demo_data.panel_data(
+        case["step"], weather_code=case["code"], is_day=not case["night"]
+    )
+    left = render_panel(
+        DEFAULT_LAYOUT.left, data, spectrum=case["levels"], mirrored=True
+    ).snapshot()
+    right = render_panel(
+        DEFAULT_LAYOUT.right, data, spectrum=case["levels"], weather_frame=case["frame"]
     ).snapshot()
     return [value for row in left for value in row], [value for row in right for value in row]
 

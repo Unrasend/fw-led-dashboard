@@ -18,6 +18,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 UNIT = ROOT / "packaging" / "framework-led-dashboard.service"
+DOCKER_UNIT = ROOT / "packaging" / "framework-led-dashboard-docker.service"
+DOCKER_WRAPPER = ROOT / "packaging" / "framework-led-dashboard-docker"
 TRAY_DESKTOP = ROOT / "packaging" / "framework-led-dashboard-tray.desktop"
 APP_ID = "io.github.unrasend.FwLedDashboard"
 MENU_DESKTOP = ROOT / "packaging" / f"{APP_ID}.desktop"
@@ -92,7 +94,8 @@ def test_menu_entry_opens_the_settings_of_the_installed_program() -> None:
     assert entry["Icon"] == "framework-led-dashboard"
     # GNOME on Wayland matches windows to menu entries by application id.
     assert entry["StartupWMClass"] == APP_ID
-    assert f'APP_ID = "{APP_ID}"' in (ROOT / "src/framework_led_dashboard/tray.py").read_text()
+    window = (ROOT / "src/framework_led_dashboard/settings_window.py").read_text()
+    assert f'APP_ID = "{APP_ID}"' in window
     assert _ini(TRAY_DESKTOP)["Desktop Entry"]["Icon"] == "framework-led-dashboard"
 
 
@@ -357,7 +360,7 @@ def test_every_package_manager_has_names_for_every_need(manager: str, tmp_path: 
 
     assert all(line.split("=", 1)[1] for line in names), names
     if manager == "apt":
-        assert names[0] == "gtk=python3-gi gir1.2-gtk-3.0"
+        assert names[0] == "gtk=python3-gi python3-gi-cairo gir1.2-gtk-3.0"
 
 
 def test_missing_needs_finds_gtk_audio_and_gnomes_missing_tray(tmp_path: Path) -> None:
@@ -397,8 +400,8 @@ def test_declined_packages_are_named_with_the_command_but_not_installed(tmp_path
         PYTHON=str(fake_python),
     )
 
-    assert "PyGObject and GTK 3" in output
-    assert "sudo pacman -S --needed python-gobject gtk3 libpulse" in output
+    assert "PyGObject with cairo and GTK 3" in output
+    assert "sudo pacman -S --needed python-gobject python-cairo gtk3 libpulse" in output
     assert not sudo_log.exists()
 
 
@@ -420,7 +423,7 @@ def test_yes_installs_the_missing_packages_with_the_package_manager(tmp_path: Pa
     )
 
     assert sudo_log.read_text(encoding="utf-8").split("\n")[0] == (
-        "apt-get install -y python3-gi gir1.2-gtk-3.0"
+        "apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0"
     )
 
 
@@ -432,3 +435,155 @@ def test_immutable_fedora_only_gets_the_command_to_run(tmp_path: Path) -> None:
     )
 
     assert output.strip() == "rpm-ostree install python3-gobject gtk3 (then reboot)"
+
+
+def test_docker_unit_runs_the_wrapper_with_the_plain_units_restart_rules(
+    unit: configparser.ConfigParser,
+) -> None:
+    docker = _ini(DOCKER_UNIT)
+    wrapper = "%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker"
+
+    assert docker["Service"]["ExecStart"] == wrapper
+    assert docker["Service"]["ExecStopPost"] == f"{wrapper} --remove"
+    assert docker["Install"]["WantedBy"] == "default.target"  # with the session, not at boot
+    for key in ("Restart", "RestartSec", "RestartSteps", "RestartMaxDelaySec",
+                "RestartPreventExitStatus", "TimeoutStopSec", "SyslogIdentifier"):
+        assert docker["Service"][key] == unit["Service"][key], key
+    assert docker["Unit"]["After"] == unit["Unit"]["After"]
+
+
+def _docker_command(tmp_path: Path, **env: str) -> list[str]:
+    script = tmp_path / "wrapper"
+    script.write_text(DOCKER_WRAPPER.read_text(encoding="utf-8").replace("@VERSION@", "9.9"))
+    runtime = tmp_path / "run"
+    (runtime / "pulse").mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["/bin/bash", str(script), "--print"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            "HOME": str(tmp_path / "home"),
+            "PATH": os.environ["PATH"],
+            "XDG_RUNTIME_DIR": str(runtime),
+            "TZ": "Europe/Prague",
+            **env,
+        },
+        timeout=30,
+    )
+    return subprocess.run(
+        ["/bin/bash", "-c", f"printf '%s\\n' {result.stdout}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+
+
+def test_docker_wrapper_gives_the_container_only_what_the_daemon_needs(tmp_path: Path) -> None:
+    command = _docker_command(tmp_path)
+    runtime = tmp_path / "run"
+    text = " ".join(command)
+
+    assert command[:2] == ["docker", "run"]
+    assert command[-3:] == ["framework-led-dashboard:9.9", "--run", "/config/config.toml"]
+    for flag in ("--read-only", "--init", "--rm"):
+        assert flag in command
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert command[command.index("--security-opt") + 1] == "no-new-privileges"
+    assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+    # The serial ports and nothing else: /dev without its submounts (terminals, shared memory)
+    # and a device rule for ttyACM only.
+    assert "--mount=type=bind,src=/dev,dst=/dev,readonly,bind-recursive=disabled" in command
+    assert command[command.index("--device-cgroup-rule") + 1] == "c 166:* rmw"
+    # Only its own folder of the session's runtime directory, never all of it.
+    assert f"--mount=type=bind,src={runtime}/framework-led-dashboard," in text
+    assert f"src={runtime}," not in text
+    assert "--mount=type=bind,src=" + str(tmp_path / "home/.config/framework-led-dashboard") + ",dst=/config,readonly" in command
+    assert "TZ=Europe/Prague" in command
+    # A user-defined network of its own: isolated, and its DNS asks the desktop's resolver.
+    assert command[command.index("--network") + 1] == "framework-led-dashboard"
+    for flag in ("--privileged", "--pid", "--ipc", "--cap-add", "--device"):
+        assert not any(part == flag or part.startswith(f"{flag}=") for part in command), flag
+    assert "docker.sock" not in text
+
+
+def test_docker_wrapper_passes_the_sound_sockets_that_exist(tmp_path: Path) -> None:
+    import socket as socket_module
+
+    runtime = tmp_path / "run"
+    (runtime / "pulse").mkdir(parents=True)
+    with socket_module.socket(socket_module.AF_UNIX) as pipewire:
+        pipewire.bind(str(runtime / "pipewire-0"))
+        command = _docker_command(tmp_path)
+
+    inside = f"/run/user/{os.getuid()}"
+    assert f"--mount=type=bind,src={runtime}/pipewire-0,dst={inside}/pipewire-0" in command
+    assert not any("pulse/native" in part for part in command)  # not there: not passed
+    assert f"XDG_RUNTIME_DIR={inside}" in command
+
+
+def test_docker_wrapper_can_use_another_network_when_asked(tmp_path: Path) -> None:
+    command = _docker_command(tmp_path, LED_DASHBOARD_DOCKER_NETWORK="host")
+
+    assert command[command.index("--network") + 1] == "host"
+
+
+def test_docker_wrapper_rejects_unknown_options() -> None:
+    result = subprocess.run(
+        ["/bin/bash", str(DOCKER_WRAPPER), "--bogus"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 2 and "usage" in result.stderr
+
+
+def test_dockerfile_builds_a_small_image_that_runs_unprivileged() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert re.search(r"^FROM alpine:3\.\d+$", dockerfile, re.MULTILINE)  # a pinned release
+    assert not re.search(r"\bpip3? install", dockerfile)  # standard library only
+    assert "USER 65534:65534" in dockerfile
+    assert 'ENTRYPOINT ["python3", "-P", "-m", "framework_led_dashboard"]' in dockerfile
+    ignored = (ROOT / ".dockerignore").read_text(encoding="utf-8").split()
+    assert ignored[ignored.index("*"):] == ["*", "!src/framework_led_dashboard", "**/__pycache__"]
+
+
+@pytest.mark.parametrize(("unit_text", "mode"), [
+    ("ExecStart=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker", "docker"),
+    ("ExecStart=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard --run x", "native"),
+    (None, "native"),
+])
+def test_an_update_keeps_the_installed_variant(tmp_path: Path, unit_text: str | None, mode: str) -> None:
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True)
+    if unit_text is not None:
+        (unit_dir / "framework-led-dashboard.service").write_text(unit_text, encoding="utf-8")
+
+    output = _sourced("installed_mode", tmp_path=tmp_path, path_tools={"grep": 'exec /usr/bin/grep "$@"'})
+
+    assert output.strip() == mode
+
+
+def test_docker_mode_does_not_ask_for_audio_tools_the_container_brings(tmp_path: Path) -> None:
+    fake_python = tmp_path / "python3"
+    fake_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+
+    output = _sourced(
+        "MODE=docker; missing_needs",
+        tmp_path=tmp_path,
+        path_tools={"busctl": "exit 0"},
+        PYTHON=str(fake_python),
+        XDG_CURRENT_DESKTOP="XFCE",
+    )
+
+    assert output.split() == []
+
+
+def test_install_script_offers_docker_and_native_and_removes_the_image_on_uninstall() -> None:
+    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "--docker) MODE=docker ;;" in text and "--native) MODE=native ;;" in text
+    assert "remove_docker_images" in _function_body(text, "uninstall")
+    assert "docker network rm framework-led-dashboard" in _function_body(text, "uninstall")
+    assert 'docker build --network host --tag "$DOCKER_IMAGE:$VERSION"' in text

@@ -16,8 +16,9 @@ from framework_led_dashboard.audio import (
     SAMPLE_RATE,
     WINDOW_SIZE,
     BandLayout,
-    MicrophoneSpectrum,
+    CaptureRequest,
     RealPowerSpectrum,
+    SoundSpectrum,
     SpectrumAnalyzer,
     capture_command,
     parec_command,
@@ -216,6 +217,15 @@ def test_pw_record_streams_the_same_raw_pcm_to_stdout() -> None:
     assert {"--raw", "--format=s16", f"--rate={SAMPLE_RATE}", "--channels=1"} <= set(command)
     assert command[-1] == "-"
     assert pw_record_command(device="mic", sample_rate=SAMPLE_RATE)[-2:] == ("--target=mic", "-")
+    assert "-P" not in command
+
+
+def test_pw_record_captures_what_the_default_output_plays_when_asked() -> None:
+    command = pw_record_command(device=None, sample_rate=SAMPLE_RATE, channels=2, capture_sink=True)
+
+    assert "--channels=2" in command
+    assert command[command.index("-P") + 1] == "{ stream.capture.sink = true }"
+    assert command[-1] == "-"  # no target: the stream follows the default output
 
 
 @pytest.mark.parametrize(
@@ -224,17 +234,45 @@ def test_pw_record_streams_the_same_raw_pcm_to_stdout() -> None:
 )
 def test_capture_prefers_parec_and_falls_back_to_pw_record(installed: set[str], tool: str) -> None:
     command = capture_command(
-        device=None,
         sample_rate=SAMPLE_RATE,
         which=lambda name: f"/usr/bin/{name}" if name in installed else None,
     )
 
     assert command[0] == tool
+    assert "--channels=1" in command
 
 
-def test_capture_without_either_tool_fails_like_a_missing_program() -> None:
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        ({"parec", "pw-record"}, ("pw-record", "-P")),
+        ({"pw-record"}, ("pw-record", "-P")),
+        ({"parec"}, ("parec", "--device=@DEFAULT_MONITOR@")),
+    ],
+)
+def test_system_sound_prefers_pw_record_and_falls_back_to_the_default_monitor(
+    installed: set[str], expected: tuple[str, str]
+) -> None:
+    command = capture_command(
+        CaptureRequest("system", 2),
+        sample_rate=SAMPLE_RATE,
+        which=lambda name: f"/usr/bin/{name}" if name in installed else None,
+    )
+
+    assert command[0] == expected[0] and expected[1] in command
+    assert "--channels=2" in command
+
+
+@pytest.mark.parametrize("source", ["microphone", "system"])
+def test_capture_without_either_tool_fails_like_a_missing_program(source: str) -> None:
     with pytest.raises(FileNotFoundError, match="parec nor pw-record"):
-        capture_command(device=None, sample_rate=SAMPLE_RATE, which=lambda _name: None)
+        capture_command(CaptureRequest(source), sample_rate=SAMPLE_RATE, which=lambda _name: None)
+
+
+@pytest.mark.parametrize(("source", "channels"), [("line-in", 1), ("system", 3), ("system", 0)])
+def test_capture_request_rejects_unknown_sources_and_channel_counts(source: str, channels: int) -> None:
+    with pytest.raises(ValueError):
+        CaptureRequest(source, channels)
 
 
 def test_parec_command_requests_mono_sixteen_bit_pcm_at_analyzer_rate() -> None:
@@ -246,19 +284,30 @@ def test_parec_command_requests_mono_sixteen_bit_pcm_at_analyzer_rate() -> None:
     assert parec_command(device="mic", sample_rate=SAMPLE_RATE)[-1] == "--device=mic"
 
 
-def test_microphone_spectrum_publishes_levels_from_pcm_stream_restarts_and_goes_stale() -> None:
-    tone = SignalBuilder().tone(1000.0, 0.3).build()
-    payload = b"".join(int(sample * 32767).to_bytes(2, "little", signed=True) for sample in tone) * 20
+def _pcm(samples: list[float]) -> bytes:
+    return b"".join(int(sample * 32767).to_bytes(2, "little", signed=True) for sample in samples)
+
+
+def _wait_for(condition, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not condition():
+        time.sleep(0.01)
+
+
+def test_sound_spectrum_publishes_levels_from_pcm_stream_restarts_and_goes_stale() -> None:
+    payload = _pcm(SignalBuilder().tone(1000.0, 0.3).build()) * 20
     processes: list[FakeProcess] = []
+    requests: list[CaptureRequest] = []
     restart_delays: list[float] = []
     now = [0.0]
 
-    def factory() -> FakeProcess:
+    def factory(request: CaptureRequest) -> FakeProcess:
+        requests.append(request)
         processes.append(FakeProcess(payload if not processes else b""))
         return processes[-1]
 
-    microphone = MicrophoneSpectrum(
-        analyzer=AnalyzerBuilder().attack(1.0).build(),
+    sound = SoundSpectrum(
+        analyzer_factory=AnalyzerBuilder().attack(1.0).build,
         process_factory=factory,
         clock=lambda: now[0],
         sleeper=restart_delays.append,
@@ -266,17 +315,61 @@ def test_microphone_spectrum_publishes_levels_from_pcm_stream_restarts_and_goes_
         restart_initial_seconds=0.5,
         restart_max_seconds=2.0,
     )
-    microphone.start()
+    sound.start()
     try:
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and len(restart_delays) < 3:
-            time.sleep(0.01)
-        levels = microphone.levels()
+        _wait_for(lambda: len(restart_delays) >= 3)
+        spectrum = sound.levels()
+        running = sound.request
     finally:
-        microphone.stop()
+        sound.stop()
 
-    assert levels is not None and levels[5] == pytest.approx(1.0)
+    assert spectrum is not None and spectrum.left[5] == pytest.approx(1.0)
+    assert spectrum.right is spectrum.left  # one channel serves both modules
+    assert running == CaptureRequest() and set(requests) == {CaptureRequest()}
     assert restart_delays[:3] == [0.5, 1.0, 2.0]
     assert all(process.poll() == 0 for process in processes[:3])
-    now[0] = 5.0
-    assert microphone.levels() is None
+    assert sound.request is None and sound.levels() is None
+
+
+def test_sound_spectrum_analyses_left_and_right_apart() -> None:
+    left = SignalBuilder().tone(1000.0, 0.3).build()
+    right = SignalBuilder().tone(150.0, 0.3).build()
+    interleaved = [sample for pair in zip(left, right, strict=True) for sample in pair]
+    payload = _pcm(interleaved) * 20
+    sound = SoundSpectrum(
+        analyzer_factory=AnalyzerBuilder().attack(1.0).build,
+        process_factory=lambda request: FakeProcess(payload),
+        sleeper=lambda _delay: time.sleep(0.01),
+    )
+    sound.start(CaptureRequest("system", 2))
+    try:
+        _wait_for(lambda: sound.levels() is not None)
+        spectrum = sound.levels()
+    finally:
+        sound.stop()
+
+    assert spectrum is not None
+    assert spectrum.left[5] == pytest.approx(1.0) and spectrum.left[1] < 0.1
+    assert spectrum.right[1] > 0.9 and spectrum.right[5] < 0.1
+    assert spectrum.side("left") is spectrum.left and spectrum.side("right") is spectrum.right
+
+
+def test_sound_spectrum_restarts_only_for_a_different_request() -> None:
+    started: list[CaptureRequest] = []
+
+    def factory(request: CaptureRequest) -> FakeProcess:
+        started.append(request)
+        return FakeProcess(b"")  # ends at once; the restart loop waits in the sleeper
+
+    sound = SoundSpectrum(process_factory=factory, sleeper=lambda _delay: time.sleep(0.05))
+    sound.start(CaptureRequest("microphone"))
+    _wait_for(lambda: len(started) >= 1)
+    sound.start(CaptureRequest("microphone"))  # the same: keeps running
+    assert sound.request == CaptureRequest("microphone")
+    sound.start(CaptureRequest("system", 2))
+    _wait_for(lambda: CaptureRequest("system", 2) in started)
+    sound.stop()
+
+    assert sound.request is None
+    assert started[0] == CaptureRequest("microphone")
+    assert started[-1] == CaptureRequest("system", 2)

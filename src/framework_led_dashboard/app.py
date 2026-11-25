@@ -15,21 +15,20 @@ from types import FrameType
 from typing import Protocol
 
 from .alerts import AlertInputs, AlertPolicy, AlertState
-from .audio import Levels, MicrophoneSpectrum
-from .bar_sources import DEFAULT_BARS
+from .audio import CaptureRequest, SoundSpectrum, Spectrum
 from .config import ConfigError, DashboardConfig
 from .control import (
     ControlError,
     ControlServer,
     DisplaySettings,
     SettingsStore,
-    bars_side,
     default_settings_path,
     default_socket_path,
+    describe_layout,
 )
 from .device_discovery import resolve_device_path
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from .left_panel import render_left_panel
+from .layout import SIDES
 from .location import (
     Coordinates,
     IpLocationClient,
@@ -47,16 +46,16 @@ from .matrix_transport import (
     prepare_panel,
     sleep_command,
 )
-from .right_panel import render_right_panel
+from .panel_render import PanelData, render_panel
 from .scheduler import LOGGER, Step, blink_on, run_loop, weather_frame_index
 from .system_metrics import SystemMetrics, SystemMetricsProvider
-from .thermal import CpuTemperatureProvider
+from .thermal import CpuTemperatureProvider, GpuTemperatureProvider
 from .weather import OpenMeteoWeatherClient, WeatherProvider, WeatherReading
 
 BLANK_FRAME: FramePixels = tuple(tuple(0 for _ in range(FRAME_WIDTH)) for _ in range(FRAME_HEIGHT))
 WEATHER_RETRY_INITIAL_SECONDS = 30.0
 WEATHER_STALE_MIN_SECONDS = 2 * 60 * 60
-MICROPHONE_STARTUP_GRACE_SECONDS = 2.0
+SOUND_STARTUP_GRACE_SECONDS = 2.0
 JOIN_TIMEOUT_SECONDS = 5.0
 DISABLED_POLL_SECONDS = 0.25
 FRAME_RESEND_SECONDS = 2.0
@@ -73,18 +72,19 @@ class PanelTransport(Protocol):
     def close(self) -> None: ...
 
 
-class Microphone(Protocol):
-    def start(self) -> None: ...
+class Sound(Protocol):
+    def start(self, request: CaptureRequest) -> None: ...
 
     def stop(self) -> None: ...
 
-    def levels(self) -> Levels | None: ...
+    def levels(self) -> Spectrum | None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class DashboardSnapshot:
     metrics: SystemMetrics = UNKNOWN_METRICS
     cpu_temperature_c: float | None = None
+    gpu_temperature_c: float | None = None
     weather: WeatherReading | None = None
     alerts: AlertState = NO_ALERTS
 
@@ -108,8 +108,8 @@ class DashboardState:
 def panel_targets(config: DashboardConfig) -> dict[str, str]:
     """USB identity of the physical left and right panel.
 
-    Which content each one shows is a live setting (DisplaySettings.swap_panels, which starts
-    from config.swap_panels), applied by side_renderer.
+    Which widgets each one shows is a live setting (DisplaySettings.layout and swap_panels,
+    the latter starting from config.swap_panels), applied by render_side on every frame.
     """
     left = config.panels.left.identity
     right = config.panels.right.identity
@@ -120,50 +120,45 @@ def panel_targets(config: DashboardConfig) -> dict[str, str]:
     return {"left": left, "right": right}
 
 
-def side_renderer(
+def render_side(
     side: str,
-    *,
-    settings: Callable[[], DisplaySettings],
-    left: Callable[[float], FramePixels],
-    right: Callable[[float], FramePixels],
-) -> Callable[[float], FramePixels]:
-    """Render for the physical panel on `side`: its own content, or the other side's while
-    the panels are swapped. The check runs every frame, so a swap shows at once."""
-    if side not in ("left", "right"):
-        raise ValueError(f"side must be 'left' or 'right', got {side!r}")
-
-    def render(now: float) -> FramePixels:
-        shows_bars = (side == "left") != settings().swap_panels
-        return left(now) if shows_bars else right(now)
-
-    return render
-
-
-def render_left(
+    settings: DisplaySettings,
     snapshot: DashboardSnapshot,
-    levels: Levels | None,
+    spectrum: Spectrum | None,
     elapsed: float,
-    *,
-    bars: Sequence[str] = DEFAULT_BARS,
 ) -> FramePixels:
-    return render_left_panel(
-        snapshot.metrics,
-        bars=bars,
-        spectrum=levels,
-        alerts=snapshot.alerts,
-        blink_on=blink_on(elapsed),
-    ).snapshot()
-
-
-def render_right(snapshot: DashboardSnapshot, levels: Levels | None, elapsed: float) -> FramePixels:
-    return render_right_panel(
-        cpu_temperature_c=snapshot.cpu_temperature_c,
-        weather=snapshot.weather,
+    """The frame for the physical panel on `side`. Its equalizer shows that side's channel and,
+    on the left, runs mirrored so the bass of both modules meets in the middle."""
+    return render_panel(
+        settings.widgets_on(side),
+        PanelData(
+            metrics=snapshot.metrics,
+            cpu_temperature_c=snapshot.cpu_temperature_c,
+            gpu_temperature_c=snapshot.gpu_temperature_c,
+            weather=snapshot.weather,
+            alerts=snapshot.alerts,
+        ),
+        spectrum=None if spectrum is None else spectrum.side(side),
+        mirrored=side == "left",
         weather_frame=weather_frame_index(elapsed),
-        spectrum=levels,
-        alerts=snapshot.alerts,
         blink_on=blink_on(elapsed),
     ).snapshot()
+
+
+def wanted_capture(settings: DisplaySettings) -> CaptureRequest | None:
+    """What to capture for the equalizers: nothing while the panels are off or no panel has
+    one; the system sound in stereo only when both panels have one (left and right)."""
+    if not settings.enabled:
+        return None
+    sides = [
+        side
+        for side in SIDES
+        if any(widget.kind == "equalizer" for widget in settings.layout.side(side))
+    ]
+    if not sides:
+        return None
+    stereo = settings.audio_source == "system" and len(sides) == 2
+    return CaptureRequest(settings.audio_source, 2 if stereo else 1)
 
 
 class SensorSampler:
@@ -176,6 +171,7 @@ class SensorSampler:
         read_metrics: Callable[[], SystemMetrics],
         read_cpu_temperature: Callable[[], float | None],
         alert_policy: AlertPolicy,
+        read_gpu_temperature: Callable[[], float | None] = lambda: None,
         interval_seconds: float,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger = LOGGER,
@@ -183,6 +179,7 @@ class SensorSampler:
         self._state = state
         self._read_metrics = read_metrics
         self._read_cpu_temperature = read_cpu_temperature
+        self._read_gpu_temperature = read_gpu_temperature
         self._alert_policy = alert_policy
         self._interval = interval_seconds
         self._clock = clock
@@ -204,7 +201,12 @@ class SensorSampler:
             now_seconds=self._clock(),
         )
         self._log_changes(self._state.snapshot().alerts, alerts, cpu_temperature)
-        self._state.update(metrics=metrics, cpu_temperature_c=cpu_temperature, alerts=alerts)
+        self._state.update(
+            metrics=metrics,
+            cpu_temperature_c=cpu_temperature,
+            gpu_temperature_c=self._read_gpu_temperature(),
+            alerts=alerts,
+        )
         return self._interval
 
     def _log_changes(
@@ -375,32 +377,33 @@ class PanelWorker:
         return DISABLED_POLL_SECONDS
 
 
-class MicrophoneWatch:
-    """Capture from the microphone only while the panels are on, and log when it comes and goes.
+class SoundWatch:
+    """Keep the sound capture in line with the settings, and log when it comes and goes.
 
-    Releasing it while the panels are off saves the spectrum analysis and frees the microphone
-    (desktops show it as in use while parec or pw-record runs). A capture that just (re)started gets
-    `startup_grace_seconds` before it counts as unavailable.
+    Nothing is captured while the panels are off or no panel has an equalizer: that saves the
+    spectrum analysis and frees the microphone (desktops show it as in use while parec or
+    pw-record runs). A capture that just (re)started gets `startup_grace_seconds` before it
+    counts as unavailable.
     """
 
     def __init__(
         self,
-        microphone: Microphone,
+        sound: Sound,
         *,
-        wanted: Callable[[], bool] = lambda: True,
+        wanted: Callable[[], CaptureRequest | None],
         interval_seconds: float = 1.0,
-        startup_grace_seconds: float = MICROPHONE_STARTUP_GRACE_SECONDS,
+        startup_grace_seconds: float = SOUND_STARTUP_GRACE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         logger: logging.Logger = LOGGER,
     ) -> None:
-        self._microphone = microphone
+        self._sound = sound
         self._wanted = wanted
         self._interval = interval_seconds
         self._grace = startup_grace_seconds
         self._clock = clock
         self._logger = logger
-        self._capturing = True  # Dashboard.start() starts the capture
-        self._judge_after = clock() + startup_grace_seconds
+        self._capturing: CaptureRequest | None = None
+        self._judge_after = -math.inf
         self._available: bool | None = None
 
     def step(self) -> float:
@@ -408,23 +411,28 @@ class MicrophoneWatch:
         if wanted != self._capturing:
             self._capturing = wanted
             self._available = None
-            if wanted:
-                self._microphone.start()
-                self._judge_after = self._clock() + self._grace
-                self._logger.info("panels on: microphone capture resumed")
+            if wanted is None:
+                self._sound.stop()
+                self._logger.info("sound capture stopped")
             else:
-                self._microphone.stop()
-                self._logger.info("panels off: microphone released")
-        if not self._capturing or self._clock() < self._judge_after:
+                self._sound.start(wanted)
+                self._judge_after = self._clock() + self._grace
+                self._logger.info("capturing %s", _describe_capture(wanted))
+        if self._capturing is None or self._clock() < self._judge_after:
             return self._interval
-        available = self._microphone.levels() is not None
+        available = self._sound.levels() is not None
         if available != self._available:
             if available:
-                self._logger.info("microphone available")
+                self._logger.info("sound available")
             else:
-                self._logger.info("microphone unavailable, equalizer dark")
+                self._logger.info("sound unavailable, equalizer dark")
         self._available = available
         return self._interval
+
+
+def _describe_capture(request: CaptureRequest) -> str:
+    what = "the microphone" if request.source == "microphone" else "the system sound"
+    return f"{what} in stereo" if request.channels == 2 else what
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,21 +443,21 @@ class Loop:
 
 
 class Dashboard:
-    """Own the loop threads, the panels' shutdown and the microphone capture."""
+    """Own the loop threads, the panels' shutdown and the sound capture."""
 
     def __init__(
         self,
         *,
         panels: Sequence[tuple[Loop, Callable[[], None]]],
         background: Sequence[Loop],
-        microphone: Microphone,
+        sound: Sound,
         on_stop: Sequence[Callable[[], None]] = (),
         join_timeout_seconds: float = JOIN_TIMEOUT_SECONDS,
         logger: logging.Logger = LOGGER,
     ) -> None:
         self._panels = tuple(panels)
         self._background = tuple(background)
-        self._microphone = microphone
+        self._sound = sound
         self._on_stop = tuple(on_stop)
         self._join_timeout = join_timeout_seconds
         self._logger = logger
@@ -457,7 +465,6 @@ class Dashboard:
         self._threads: dict[str, threading.Thread] = {}
 
     def start(self) -> None:
-        self._microphone.start()
         for loop in (*(loop for loop, _shutdown in self._panels), *self._background):
             thread = threading.Thread(
                 target=run_loop,
@@ -483,7 +490,7 @@ class Dashboard:
             shutdown()
         for callback in self._on_stop:
             callback()
-        self._microphone.stop()
+        self._sound.stop()
 
 
 def default_cache_directory() -> Path:
@@ -501,23 +508,23 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         default_swap_panels=config.swap_panels,
         default_cpu_alert_celsius=config.alerts.cpu_temperature_critical_c,
     )
-    control = ControlServer(store, path=default_socket_path())
-    control.open()
     state = DashboardState()
-    microphone = MicrophoneSpectrum()
+    sound = SoundSpectrum()
     started = time.monotonic()
+
+    def render(side: str, now: float) -> FramePixels:
+        return render_side(side, store.current(), state.snapshot(), sound.levels(), now - started)
+
+    def current_frames() -> dict[str, FramePixels]:
+        now = time.monotonic()
+        return {side: render(side, now) for side in SIDES}
+
+    control = ControlServer(store, path=default_socket_path(), frames=current_frames)
+    control.open()
     prepare = prepare_panel(lambda: store.current().brightness_percent)
 
-    def live_left(now: float) -> FramePixels:
-        bars = store.current().bars
-        return render_left(state.snapshot(), microphone.levels(), now - started, bars=bars)
-
-    def live_right(now: float) -> FramePixels:
-        return render_right(state.snapshot(), microphone.levels(), now - started)
-
     panels = []
-    for side in ("left", "right"):
-        render = side_renderer(side, settings=store.current, left=live_left, right=live_right)
+    for side in SIDES:
         transport = MatrixTransport(
             identity=targets[side],
             path_resolver=resolve_device_path,
@@ -526,7 +533,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         worker = PanelWorker(
             side,
             transport,
-            render,
+            lambda now, side=side: render(side, now),
             settings=store.current,
             max_fps=config.animation_fps,
         )
@@ -536,6 +543,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         state,
         read_metrics=SystemMetricsProvider().read,
         read_cpu_temperature=CpuTemperatureProvider().read_celsius,
+        read_gpu_temperature=GpuTemperatureProvider().read_celsius,
         alert_policy=AlertPolicy(
             config.alerts,
             cpu_temperature_critical=lambda: store.current().cpu_alert_celsius,
@@ -553,23 +561,19 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
     background = (
         Loop("sensors", sampler.step),
         Loop("weather", weather.step),
-        Loop(
-            "microphone-watch",
-            MicrophoneWatch(microphone, wanted=lambda: store.current().enabled).step,
-        ),
+        Loop("sound-watch", SoundWatch(sound, wanted=lambda: wanted_capture(store.current())).step),
         Loop("control", control.step),
     )
     settings = store.current()
     LOGGER.info(
-        "display: brightness %d%%, %s, bars on the %s panel: %s",
+        "display: brightness %d%%, %s%s; layout: %s; equalizer source: %s",
         settings.brightness_percent,
         "on" if settings.enabled else "off",
-        bars_side(settings),
-        ", ".join(settings.bars),
+        ", panels swapped" if settings.swap_panels else "",
+        describe_layout(settings.layout),
+        settings.audio_source,
     )
-    return Dashboard(
-        panels=panels, background=background, microphone=microphone, on_stop=(control.close,)
-    )
+    return Dashboard(panels=panels, background=background, sound=sound, on_stop=(control.close,))
 
 
 def _location_resolver(config: DashboardConfig) -> LocationResolver:

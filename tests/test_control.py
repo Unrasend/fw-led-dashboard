@@ -17,9 +17,30 @@ from framework_led_dashboard.control import (
     ControlServer,
     DisplaySettings,
     SettingsStore,
+    decode_frame,
+    default_socket_path,
+    encode_frame,
     handle_request,
 )
+from framework_led_dashboard.frame import FRAME_HEIGHT, FRAME_WIDTH
+from framework_led_dashboard.layout import (
+    DEFAULT_LAYOUT,
+    Layout,
+    bars,
+    classic_left,
+    classic_right,
+    default_layout,
+    equalizer,
+    space,
+    temperature,
+)
 from framework_led_dashboard.scheduler import run_loop
+
+SMALL_LAYOUT = Layout(left=(temperature("gpu"), space(2), bars(("disk", "gpu", "battery"), 9)), right=(equalizer(5),))
+FRAMES = {
+    "left": tuple(tuple((x + y) % 256 for x in range(FRAME_WIDTH)) for y in range(FRAME_HEIGHT)),
+    "right": tuple(tuple(255 if x == y % FRAME_WIDTH else 0 for x in range(FRAME_WIDTH)) for y in range(FRAME_HEIGHT)),
+}
 
 
 @pytest.fixture
@@ -32,7 +53,7 @@ def short_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def running_server(short_dir: Path) -> Iterator[tuple[ControlServer, SettingsStore, Path]]:
     store = SettingsStore(DisplaySettings(40))
     path = short_dir / "d.sock"
-    server = ControlServer(store, path=path, accept_timeout_seconds=0.05)
+    server = ControlServer(store, path=path, frames=lambda: FRAMES, accept_timeout_seconds=0.05)
     server.open()
     stop = threading.Event()
     thread = threading.Thread(target=run_loop, args=(server.step, stop), kwargs={"name": "control"})
@@ -55,12 +76,27 @@ def test_display_settings_reject_invalid_values(brightness: object, enabled: obj
 
 
 @pytest.mark.parametrize(
-    "bars",
-    [("cpu", "ram"), ("cpu", "ram", "fan"), ["cpu", "ram", "gpu"], ("cpu", "ram", 3)],
+    ("changes", "message"),
+    [
+        ({"layout": {"left": [], "right": []}}, "layout"),
+        ({"audio_source": "line-in"}, "audio_source"),
+        ({"audio_source": None}, "audio_source"),
+    ],
 )
-def test_display_settings_reject_invalid_bars(bars: object) -> None:
-    with pytest.raises((TypeError, ValueError), match="bars"):
-        DisplaySettings(40, bars=bars)
+def test_display_settings_reject_a_bad_layout_or_sound_source(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        DisplaySettings(40, **changes)
+
+
+def test_swapped_panels_show_each_others_widgets() -> None:
+    settings = DisplaySettings(40, layout=SMALL_LAYOUT)
+
+    assert settings.widgets_on("left") == SMALL_LAYOUT.left
+    assert DisplaySettings(40, layout=SMALL_LAYOUT, swap_panels=True).widgets_on("left") == (
+        SMALL_LAYOUT.right
+    )
 
 
 @pytest.mark.parametrize(
@@ -96,26 +132,25 @@ def test_settings_store_persists_updates_and_reloads_them(tmp_path: Path) -> Non
 
     reloaded = SettingsStore.load(path, default_brightness_percent=40)
     assert reloaded.current() == DisplaySettings(70, enabled=False)
-    assert json.loads(path.read_text(encoding="utf-8")) == {
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved == {
         "brightness_percent": 70,
         "enabled": False,
-        "bars": ["battery", "cpu", "ram"],
         "swap_panels": False,
         "cpu_alert_celsius": 120,
+        "layout": DEFAULT_LAYOUT.to_json(),
+        "audio_source": "microphone",
     }
 
 
-def test_settings_store_persists_bar_choice(tmp_path: Path) -> None:
+def test_settings_store_persists_the_layout_and_the_sound_source(tmp_path: Path) -> None:
     path = tmp_path / "display.json"
     store = SettingsStore.load(path, default_brightness_percent=40)
 
-    assert store.update(bars=("gpu", "cpu", "disk")).bars == ("gpu", "cpu", "disk")
+    store.update(layout=SMALL_LAYOUT, audio_source="system")
 
-    assert SettingsStore.load(path, default_brightness_percent=40).current().bars == (
-        "gpu",
-        "cpu",
-        "disk",
-    )
+    reloaded = SettingsStore.load(path, default_brightness_percent=40).current()
+    assert (reloaded.layout, reloaded.audio_source) == (SMALL_LAYOUT, "system")
 
 
 def test_settings_store_reads_a_file_saved_before_bars_existed(tmp_path: Path) -> None:
@@ -124,7 +159,26 @@ def test_settings_store_reads_a_file_saved_before_bars_existed(tmp_path: Path) -
 
     store = SettingsStore.load(path, default_brightness_percent=40)
 
-    assert store.current() == DisplaySettings(55, enabled=False, bars=("battery", "cpu", "ram"))
+    assert store.current() == DisplaySettings(55, enabled=False, layout=DEFAULT_LAYOUT)
+
+
+def test_settings_store_moves_the_bars_of_a_file_from_before_layouts_into_the_default_layout(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "display.json"
+    path.write_text(
+        json.dumps(
+            {"brightness_percent": 55, "enabled": True, "bars": ["gpu", "cpu", "disk"],
+             "swap_panels": True, "cpu_alert_celsius": 95}
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = SettingsStore.load(path, default_brightness_percent=40).current()
+
+    assert loaded == DisplaySettings(
+        55, swap_panels=True, cpu_alert_celsius=95, layout=default_layout(("gpu", "cpu", "disk"))
+    )
 
 
 def test_settings_store_starts_with_the_configured_swap_and_then_keeps_the_trays(
@@ -152,7 +206,9 @@ def test_settings_store_reads_a_file_saved_before_swapping_existed(tmp_path: Pat
         loaded = SettingsStore.load(
             path, default_brightness_percent=40, default_swap_panels=configured
         ).current()
-        assert loaded == DisplaySettings(55, bars=("cpu", "ram", "gpu"), swap_panels=configured)
+        assert loaded == DisplaySettings(
+            55, swap_panels=configured, layout=default_layout(("cpu", "ram", "gpu"))
+        )
 
 
 def test_settings_store_starts_with_the_configured_cpu_alert_and_keeps_the_trays(
@@ -173,19 +229,27 @@ def test_settings_store_starts_with_the_configured_cpu_alert_and_keeps_the_trays
     assert [record.getMessage() for record in caplog.records] == ["CPU temperature alert at 92 °C"]
 
 
-def test_settings_store_logs_which_panel_shows_the_bars(
+def test_settings_store_logs_swaps_layouts_and_sound_sources(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     store = SettingsStore.load(tmp_path / "display.json", default_brightness_percent=40)
+    classic = Layout(left=classic_left(), right=classic_right())
 
     with caplog.at_level(logging.INFO):
         store.update(swap_panels=True)
         store.update(swap_panels=True)  # no change, no message
         store.update(swap_panels=False)
+        store.update(layout=classic)
+        store.update(audio_source="system")
 
     assert [record.getMessage() for record in caplog.records] == [
-        "bars on the right panel",
-        "bars on the left panel",
+        "panels swapped",
+        "panels not swapped",
+        (
+            "layout: left bars, line, space, equalizer; right weather icon, space, outside "
+            "temperature, space, cpu temperature, space, equalizer"
+        ),
+        "equalizer source: system",
     ]
 
 
@@ -201,7 +265,13 @@ def test_settings_store_keeps_old_value_after_invalid_update(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "content",
-    ["not json", "[]", '{"brightness_percent": 300, "enabled": true}', '{"enabled": true}'],
+    [
+        "not json",
+        "[]",
+        '{"brightness_percent": 300, "enabled": true}',
+        '{"enabled": true}',
+        '{"brightness_percent": 40, "enabled": true, "layout": {"left": [{"kind": "clock"}], "right": []}}',
+    ],
 )
 def test_settings_store_ignores_a_corrupt_file(
     tmp_path: Path,
@@ -225,20 +295,46 @@ def test_handle_request_reports_and_changes_settings() -> None:
         "ok": True,
         "brightness_percent": 40,
         "enabled": True,
-        "bars": ("battery", "cpu", "ram"),
         "swap_panels": False,
         "cpu_alert_celsius": 120,
+        "layout": DEFAULT_LAYOUT.to_json(),
+        "audio_source": "microphone",
     }
     assert (
         handle_request(store, {"command": "set", "brightness_percent": 65})["brightness_percent"]
         == 65
     )
     assert handle_request(store, {"command": "set", "enabled": False})["enabled"] is False
-    changed = handle_request(store, {"command": "set", "bars": ["swap", "cpu", "gpu"]})
-    assert changed["bars"] == ("swap", "cpu", "gpu")
     assert handle_request(store, {"command": "set", "swap_panels": True})["swap_panels"] is True
     changed = handle_request(store, {"command": "set", "cpu_alert_celsius": 95})
     assert changed["cpu_alert_celsius"] == 95
+    changed = handle_request(store, {"command": "set", "layout": SMALL_LAYOUT.to_json()})
+    assert changed["layout"] == SMALL_LAYOUT.to_json()
+    assert store.current().layout == SMALL_LAYOUT
+    changed = handle_request(store, {"command": "set", "audio_source": "system"})
+    assert changed["audio_source"] == "system"
+
+
+def test_frames_are_sent_as_hex_and_come_back_unchanged() -> None:
+    store = SettingsStore(DisplaySettings(40))
+
+    response = handle_request(store, {"command": "frames"}, frames=lambda: FRAMES)
+
+    assert response["ok"] is True
+    assert {side: decode_frame(response[side]) for side in ("left", "right")} == FRAMES
+    assert len(encode_frame(FRAMES["left"])) == 2 * FRAME_WIDTH * FRAME_HEIGHT
+
+
+def test_frames_need_a_dashboard_that_renders_them() -> None:
+    response = handle_request(SettingsStore(DisplaySettings(40)), {"command": "frames"})
+
+    assert response["ok"] is False
+
+
+@pytest.mark.parametrize("text", ["", "zz", "00" * (FRAME_WIDTH * FRAME_HEIGHT - 1)])
+def test_decode_frame_rejects_what_is_not_a_frame(text: str) -> None:
+    with pytest.raises(ValueError):
+        decode_frame(text)
 
 
 @pytest.mark.parametrize(
@@ -249,8 +345,15 @@ def test_handle_request_reports_and_changes_settings() -> None:
         ({"command": "set", "color": "red"}, "unknown fields: color"),
         ({"command": "set", "brightness_percent": "max"}, "brightness_percent"),
         ({"command": "set", "enabled": "on"}, "enabled"),
-        ({"command": "set", "bars": "cpu,ram,gpu"}, "bars"),
-        ({"command": "set", "bars": ["cpu", "ram", "fan"]}, "bars"),
+        ({"command": "set", "bars": ["cpu", "ram", "gpu"]}, "unknown fields: bars"),
+        ({"command": "set", "layout": "default"}, "layout"),
+        ({"command": "set", "layout": {"left": [], "right": [], "top": []}}, "unknown fields: top"),
+        ({"command": "set", "layout": {"left": [{"kind": "clock"}], "right": []}}, "clock"),
+        (
+            {"command": "set", "layout": {"left": [{"kind": "equalizer", "height": 30}] * 2, "right": []}},
+            "rows",
+        ),
+        ({"command": "set", "audio_source": "line-in"}, "audio_source"),
         ({"command": "set", "swap_panels": "yes"}, "swap_panels"),
         ({"command": "set", "swap_panels": 1}, "swap_panels"),
         ({"command": "set", "cpu_alert_celsius": 20}, "cpu_alert_celsius"),
@@ -276,12 +379,19 @@ def test_client_and_server_round_trip(
     assert client.status() == DisplaySettings(40)
     assert client.set(brightness_percent=80) == DisplaySettings(80)
     assert client.set(enabled=False) == DisplaySettings(80, enabled=False)
-    assert client.set(bars=("disk", "gpu", "battery")).bars == ("disk", "gpu", "battery")
+    assert client.set(layout=SMALL_LAYOUT).layout == SMALL_LAYOUT
     assert client.set(swap_panels=True).swap_panels is True
     assert client.set(cpu_alert_celsius=88).cpu_alert_celsius == 88
+    assert client.set(audio_source="system").audio_source == "system"
     assert store.current() == DisplaySettings(
-        80, enabled=False, bars=("disk", "gpu", "battery"), swap_panels=True, cpu_alert_celsius=88
+        80,
+        enabled=False,
+        swap_panels=True,
+        cpu_alert_celsius=88,
+        layout=SMALL_LAYOUT,
+        audio_source="system",
     )
+    assert client.frames() == FRAMES
 
 
 def test_client_surfaces_rejected_request(
@@ -329,6 +439,24 @@ def test_second_server_refuses_a_socket_that_is_still_answering(
 
     with pytest.raises(ControlError, match="already"):
         second.open()
+
+
+def test_server_makes_a_private_folder_for_its_socket(short_dir: Path) -> None:
+    path = short_dir / "folder" / "c.sock"
+    server = ControlServer(SettingsStore(DisplaySettings(40)), path=path)
+
+    server.open()
+    try:
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert stat.S_ISSOCK(path.stat().st_mode)
+    finally:
+        server.close()
+
+
+def test_default_socket_sits_in_a_folder_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+
+    assert default_socket_path() == Path("/run/user/4242/framework-led-dashboard/control.sock")
 
 
 def test_server_replaces_a_stale_socket_and_removes_it_on_close(short_dir: Path) -> None:

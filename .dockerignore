@@ -1,0 +1,4 @@
+# Only the program goes into the image: never config.toml, tasks/ or anything else here.
+*
+!src/framework_led_dashboard
+**/__pycache__

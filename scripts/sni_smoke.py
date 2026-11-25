@@ -80,7 +80,6 @@ def main() -> None:
         ControlClient(socket_path),
         open_settings=lambda: events.append("settings"),
         quit=lambda: events.append("quit"),
-        on_change=lambda _settings: None,
     )
     results: dict[str, object] = {}
     loop = GLib.MainLoop()

@@ -2,8 +2,8 @@
 brightness_percent = 40
 # Frame-rate cap per panel; grayscale output tops out near 7 FPS in the panel firmware.
 animation_fps = 10
-# Bars on the right panel, weather on the left. Only the starting value: the tray's
-# "Swap panels" switch changes it live and remembers its choice.
+# Each panel shows the other one's widgets. Only the starting value: "Swap panels" in the tray
+# or the settings window changes it live and remembers the choice.
 swap_panels = false
 
 # USB identities from `framework-led-dashboard --list-panels`; the installer fills them in.
@@ -26,8 +26,9 @@ metrics_seconds = 1
 weather_seconds = 900
 
 [alerts]
-# The CPU threshold is only the starting value: the tray's "CPU alert" item changes it and
-# remembers it. It stops blinking (critical - recovery) degrees lower, 5 °C here.
+# The CPU threshold is only the starting value: "Blink from" on the CPU temperature widget in
+# the settings window changes it and remembers it. It stops blinking (critical - recovery)
+# degrees lower, 5 °C here.
 cpu_temperature_critical_c = 120
 cpu_temperature_recovery_c = 115
 battery_critical_percent = 10

@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -151,10 +151,15 @@ def timezone_city(
     *,
     timezone_file: str | Path = "/etc/timezone",
     localtime_file: str | Path = "/etc/localtime",
+    environ: Mapping[str, str] = os.environ,
 ) -> str | None:
-    timezone_name: str | None = None
+    # A zone name in TZ first: the Docker variant passes the desktop's zone there (a
+    # container's /etc/localtime is not the desktop's). A path in TZ is left to the files.
+    zone = environ.get("TZ", "").lstrip(":")
+    timezone_name: str | None = zone if zone and not zone.startswith("/") else None
     try:
-        timezone_name = Path(timezone_file).read_text(encoding="utf-8").strip()
+        if timezone_name is None:
+            timezone_name = Path(timezone_file).read_text(encoding="utf-8").strip()
     except OSError:
         try:
             resolved = Path(localtime_file).resolve(strict=True)

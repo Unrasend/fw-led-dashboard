@@ -1,7 +1,8 @@
-"""Tray icon and settings for the running dashboard (GTK 3).
+"""Tray icon for the running dashboard (GTK 3): the quick controls only.
 
-`--tray` runs a Gtk.Application that keeps a tray icon; `--settings` opens the settings window
-(in the running tray when there is one). The icon depends on the desktop (tray_model):
+`--tray` keeps an icon with on/off, brightness and "Swap panels"; everything else is in the
+settings window, which runs as a process of its own (`--settings`) and is gone from memory once
+closed. The icon depends on the desktop (tray_model):
 
 - XFCE, MATE, Cinnamon on X11 (XEmbed): left click opens a GTK popup like the XFCE PulseAudio
   plugin's, with a real switch and slider in it;
@@ -21,6 +22,7 @@ import signal
 import sys
 import warnings
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 import gi
 
@@ -28,32 +30,40 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk
 
-from .bar_sources import BAR_COUNT, BAR_SLOT_NAMES, BAR_SOURCES
-from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
-from .control import ControlClient, ControlError, DisplaySettings, bars_side, weather_side
+from .control import ControlClient, ControlError, DisplaySettings
 from .dbusmenu import build_menu
-from .settings_window import SWAP_HINT, SettingsWindow, icon_pixbuf
-from .tray_model import choose_backend, tray_summary
+from .led_icon import icon_pixbuf
+from .tray_model import SWAP_HINT, choose_backend, tray_summary
 
 # Gtk.StatusIcon is deprecated, but it is the GTK 3 icon that reports clicks and its position;
 # XFCE's tray still shows it (XEmbed).
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=__name__)
 
-APP_ID = "io.github.unrasend.FwLedDashboard"
+TRAY_APP_ID = "io.github.unrasend.FwLedDashboard.Tray"
 REFRESH_INTERVAL_SECONDS = 5
 SEND_DELAY_MS = 120
 SCROLL_STEP_PERCENT = 5
-BAR_SLOT_HINTS = (
-    "Columns 0–1 of the {side} panel; 21 LEDs high = 100%.",
-    "Columns 3–5 of the {side} panel; 21 LEDs high = 100%.",
-    "Columns 7–8 of the {side} panel; 21 LEDs high = 100%.",
-)
-CPU_ALERT_HINT = "The CPU temperature blinks from this value on. Click to change it."
 NO_TRAY_HINT = (
     "No tray on this desktop. Open “LED Matrix Dashboard” from the application menu; on GNOME, "
     "the “AppIndicator and KStatusNotifierItem Support” extension adds a tray."
 )
-Apply = Callable[..., None]
+
+
+def open_settings_window() -> None:
+    """Start `--settings` as a process of its own: it shows the window (or raises the one that
+    is open) and exits when it is closed, so the tray never holds the window in memory."""
+    package_parent = str(Path(__file__).resolve().parent.parent)
+    launcher = Gio.SubprocessLauncher.new(Gio.SubprocessFlags.NONE)
+    paths = [package_parent, *filter(None, os.environ.get("PYTHONPATH", "").split(os.pathsep))]
+    launcher.setenv("PYTHONPATH", os.pathsep.join(dict.fromkeys(paths)), True)
+    try:
+        process = launcher.spawnv(
+            [sys.executable, "-P", "-m", "framework_led_dashboard", "--settings"]
+        )
+    except GLib.Error as error:
+        print(f"cannot open the settings window: {error.message}", file=sys.stderr)
+        return
+    process.wait_async(None, lambda process, result: process.wait_finish(result))  # reap it
 
 
 class SwitchMenuItem(Gtk.MenuItem):
@@ -150,125 +160,8 @@ class ScaleMenuItem(Gtk.MenuItem):
         self.scale.set_value(round(lower + fraction * (upper - lower)))
 
 
-class BarMenuItem(Gtk.MenuItem):
-    """ "Bar N: <source>" with a submenu of radio items, one per data source."""
-
-    def __init__(self, slot: int, on_choose) -> None:
-        super().__init__(label=BAR_SLOT_NAMES[slot])
-        self.slot = slot
-        self._on_choose = on_choose
-        self._updating = False
-        self._radios: dict[str, Gtk.RadioMenuItem] = {}
-        submenu = Gtk.Menu()
-        group = None
-        for key, source in BAR_SOURCES.items():
-            radio = Gtk.RadioMenuItem.new_with_label_from_widget(group, source.label)
-            group = radio
-            radio.set_tooltip_text(source.hint)
-            radio.connect("toggled", self._toggled, key)
-            submenu.append(radio)
-            self._radios[key] = radio
-        self.set_submenu(submenu)
-
-    def show_source(self, key: str, *, side: str) -> None:
-        self._updating = True
-        self._radios[key].set_active(True)
-        self._updating = False
-        source = BAR_SOURCES[key]
-        self.set_label(f"{BAR_SLOT_NAMES[self.slot]}: {source.label}")
-        hint = BAR_SLOT_HINTS[self.slot].format(side=side)
-        self.set_tooltip_text(f"{hint}\n\n{source.hint}")
-
-    def _toggled(self, radio: Gtk.RadioMenuItem, key: str) -> None:
-        if radio.get_active() and not self._updating:
-            self._on_choose(self.slot, key)
-
-
-class CpuAlertDialog(Gtk.Dialog):
-    """Number input for the CPU temperature alert."""
-
-    def __init__(self, *, celsius: float, side: str) -> None:
-        super().__init__(title="CPU temperature alert")
-        self.set_resizable(False)
-        self.set_keep_above(True)
-        self.set_position(Gtk.WindowPosition.MOUSE)
-        self.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Apply", Gtk.ResponseType.OK)
-        self.set_default_response(Gtk.ResponseType.OK)
-
-        adjustment = Gtk.Adjustment(
-            value=round(celsius),
-            lower=CPU_ALERT_MIN_CELSIUS,
-            upper=CPU_ALERT_MAX_CELSIUS,
-            step_increment=1,
-            page_increment=5,
-        )
-        self.spin = Gtk.SpinButton(adjustment=adjustment, climb_rate=1, digits=0)
-        self.spin.set_numeric(True)
-        self.spin.set_activates_default(True)  # Enter applies
-
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        row.pack_start(
-            Gtk.Label(label=f"Blink the CPU temperature on the {side} panel at", xalign=0),
-            False,
-            False,
-            0,
-        )
-        row.pack_start(self.spin, False, False, 0)
-        row.pack_start(Gtk.Label(label="°C"), False, False, 0)
-        hint = Gtk.Label(xalign=0)
-        hint.set_markup(
-            "<small>"
-            + GLib.markup_escape_text(
-                f"From {CPU_ALERT_MIN_CELSIUS} to {CPU_ALERT_MAX_CELSIUS} °C. It stops blinking "
-                "once the temperature is a little lower again (5 °C unless config.toml says "
-                "otherwise)."
-            )
-            + "</small>"
-        )
-        hint.set_line_wrap(True)
-        hint.set_max_width_chars(48)
-        hint.get_style_context().add_class("dim-label")
-
-        content = self.get_content_area()
-        content.set_spacing(10)
-        content.set_border_width(12)
-        content.pack_start(row, False, False, 0)
-        content.pack_start(hint, False, False, 0)
-        content.show_all()
-
-    @property
-    def celsius(self) -> int:
-        self.spin.update()  # take a number that was typed but not yet confirmed
-        return self.spin.get_value_as_int()
-
-
-class CpuAlertPrompt:
-    """One CPU alert dialog at a time, applying the typed value through `apply`."""
-
-    def __init__(self, apply: Apply) -> None:
-        self._apply = apply
-        self._dialog: CpuAlertDialog | None = None
-
-    def open(self, settings: DisplaySettings | None) -> None:
-        if settings is None:
-            return
-        if self._dialog is None:
-            self._dialog = CpuAlertDialog(
-                celsius=settings.cpu_alert_celsius, side=weather_side(settings)
-            )
-            self._dialog.connect("response", self._on_response)
-        self._dialog.present_with_time(Gtk.get_current_event_time())
-        self._dialog.spin.grab_focus()  # selects the number, so typing replaces it
-
-    def _on_response(self, dialog: CpuAlertDialog, response: int) -> None:
-        if response == Gtk.ResponseType.OK:
-            self._apply(cpu_alert_celsius=dialog.celsius)
-        dialog.destroy()
-        self._dialog = None
-
-
 class XembedTray:
-    """Gtk.StatusIcon with the GTK popup: switch, slider, bar submenus and the CPU alert."""
+    """Gtk.StatusIcon with the GTK popup: switch, slider and "Swap panels"."""
 
     def __init__(
         self,
@@ -276,15 +169,12 @@ class XembedTray:
         *,
         open_settings: Callable[[], None],
         quit: Callable[[], None],
-        on_change: Callable[[DisplaySettings | None], None],
     ) -> None:
         self._client = client
-        self._on_change = on_change
         self._settings: DisplaySettings | None = None
         self._icon_state = "unreachable"
         self._send_source: int | None = None
         self._updating = False
-        self._alert = CpuAlertPrompt(self._apply)
 
         self._icon = Gtk.StatusIcon()
         self._icon.set_title("LED Matrix")
@@ -302,16 +192,8 @@ class XembedTray:
         self._swap = SwitchMenuItem("Swap panels", bold=False)
         self._swap.set_tooltip_text(SWAP_HINT)
         self._swap.switch.connect("notify::active", self._on_swap_switched)
-        self._bars_title = Gtk.MenuItem(label="Left panel bars")
-        self._bars_title.set_sensitive(False)
-        self._bars_title.set_tooltip_text(
-            "What each bar shows. Hover a source to see where its data comes from."
-        )
-        self._bars = [BarMenuItem(slot, self._on_bar_chosen) for slot in range(BAR_COUNT)]
-        self._cpu_alert = Gtk.MenuItem(label="CPU alert…")
-        self._cpu_alert.set_tooltip_text(CPU_ALERT_HINT)
-        self._cpu_alert.connect("activate", lambda _item: self._alert.open(self._settings))
         settings_item = Gtk.MenuItem(label="Settings…")
+        settings_item.set_tooltip_text("Widgets on each panel, their sources and sizes")
         settings_item.connect("activate", lambda _item: open_settings())
         for item in (
             self._unreachable,
@@ -319,10 +201,6 @@ class XembedTray:
             self._brightness,
             self._swap,
             Gtk.SeparatorMenuItem(),
-            self._bars_title,
-            *self._bars,
-            Gtk.SeparatorMenuItem(),
-            self._cpu_alert,
             settings_item,
         ):
             self._menu.append(item)
@@ -349,7 +227,7 @@ class XembedTray:
         self._settings = settings
         reachable = settings is not None
         self._unreachable.set_visible(not reachable)
-        for item in (self._power, self._brightness, self._swap, *self._bars, self._cpu_alert):
+        for item in (self._power, self._brightness, self._swap):
             item.set_sensitive(reachable)
         state, title, description = tray_summary(settings)
         self._set_icon(state, f"{title}\n{description}")
@@ -361,11 +239,6 @@ class XembedTray:
         self._swap.switch.set_active(settings.swap_panels)
         self._updating = False
         self._brightness.value_label.set_text(f"{settings.brightness_percent}%")
-        side = bars_side(settings)
-        self._bars_title.set_label(f"{side.capitalize()} panel bars")
-        for item, key in zip(self._bars, settings.bars, strict=True):
-            item.show_source(key, side=side)
-        self._cpu_alert.set_label(f"CPU alert: {settings.cpu_alert_celsius:g} °C…")
 
     def _on_activate(self, _icon: Gtk.StatusIcon) -> None:
         if self._menu.get_visible():
@@ -407,7 +280,6 @@ class XembedTray:
         except ControlError:
             settings = None
         self.show(settings)
-        self._on_change(settings)
 
     def _on_power_switched(self, switch: Gtk.Switch, _property: object) -> None:
         if not self._updating:
@@ -435,13 +307,6 @@ class XembedTray:
             GLib.source_remove(self._send_source)
             self._send_brightness()
 
-    def _on_bar_chosen(self, slot: int, key: str) -> None:
-        if self._settings is None:
-            return
-        bars = list(self._settings.bars)
-        bars[slot] = key
-        self._apply(bars=bars)
-
 
 class SniTray:
     """StatusNotifierItem icon; the host draws the menu that dbusmenu.build_menu describes."""
@@ -452,16 +317,13 @@ class SniTray:
         *,
         open_settings: Callable[[], None],
         quit: Callable[[], None],
-        on_change: Callable[[DisplaySettings | None], None],
     ) -> None:
         from .sni import StatusNotifierTray
 
         self._client = client
         self._open_settings = open_settings
         self._quit = quit
-        self._on_change = on_change
         self._settings: DisplaySettings | None = None
-        self._alert = CpuAlertPrompt(self._apply)
         self._scroll_target: int | None = None
         self._scroll_source: int | None = None
         self._tray = StatusNotifierTray(
@@ -495,15 +357,6 @@ class SniTray:
 
     def set_swap(self, swapped: bool) -> None:
         self._apply(swap_panels=swapped)
-
-    def set_bar(self, slot: int, key: str) -> None:
-        if self._settings is not None:
-            bars = list(self._settings.bars)
-            bars[slot] = key
-            self._apply(bars=bars)
-
-    def open_cpu_alert(self) -> None:
-        self._alert.open(self._settings)
 
     def open_settings(self) -> None:
         self._open_settings()
@@ -542,116 +395,52 @@ class SniTray:
         except ControlError:
             settings = None
         self.show(settings)
-        self._on_change(settings)
 
 
-class Gui:
-    """The tray (if any) and the settings window of one Gtk.Application."""
-
-    def __init__(self, app: Gtk.Application, client: ControlClient) -> None:
-        self._app = app
-        self._client = client
-        self._window: SettingsWindow | None = None
-        self._tray: XembedTray | SniTray | None = None
-
-    def start_tray(self, backend: str) -> bool:
-        if self._tray is not None:
-            return True
-        tray_class = {"xembed": XembedTray, "sni": SniTray}.get(backend)
-        if tray_class is None:
-            return False
-        self._tray = tray_class(
-            self._client,
-            open_settings=self.show_settings,
-            quit=self._app.quit,
-            on_change=self._tray_changed,
-        )
-        self._app.hold()
-        return True
-
-    def show_settings(self) -> None:
-        if self._window is None:
-            self._window = SettingsWindow(
-                self._client, application=self._app, on_change=self._window_changed
-            )
-            self._window.connect("destroy", self._window_closed)
-        else:
-            self._window.refresh()
-        self._window.present_with_time(Gtk.get_current_event_time())
-
-    def _window_changed(self, settings: DisplaySettings | None) -> None:
-        if self._tray is not None:
-            self._tray.show(settings)
-
-    def _tray_changed(self, settings: DisplaySettings | None) -> None:
-        if self._window is not None:
-            self._window.show_settings(settings)
-
-    def _window_closed(self, _window: SettingsWindow) -> None:
-        self._window = None
-
-
-def run_gui(
-    mode: str,
+def run_tray(
     client: ControlClient | None = None,
     *,
     env: Mapping[str, str] = os.environ,
 ) -> int:
-    """mode "tray": keep a tray icon; mode "settings": show the settings window."""
-    GLib.set_prgname(APP_ID)  # window class = the menu entry's StartupWMClass
+    """Keep the tray icon the desktop supports until "Quit tray" (one tray per session)."""
     initialized, _argv = Gtk.init_check(sys.argv[:1])
     if not initialized:
-        print("cannot open a display for the tray or the settings window", file=sys.stderr)
+        print("cannot open a display for the tray", file=sys.stderr)
         return 1
-    app = Gtk.Application(application_id=APP_ID)
-    app.add_action(Gio.SimpleAction.new("start-tray", None))
+    from .sni import watcher_present
+
+    backend = choose_backend(env, watcher_present=watcher_present())
+    tray_class = {"xembed": XembedTray, "sni": SniTray}.get(backend)
+    if tray_class is None:
+        print(NO_TRAY_HINT, file=sys.stderr)
+        return 0
+    app = Gtk.Application(application_id=TRAY_APP_ID)
     try:
         app.register(None)
     except GLib.Error as error:
         print(f"cannot start: {error.message}", file=sys.stderr)
         return 1
     if app.get_is_remote():
-        # Another instance runs already. Settings: run() activates it, which opens the window
-        # there. Tray: that instance may be a settings window alone, so ask it for a tray.
-        if mode == "settings":
-            return app.run([])
-        app.activate_action("start-tray", None)
-        app.get_dbus_connection().flush_sync(None)
-        return 0
-
-    gui = Gui(app, client or ControlClient())
-    activations = [0]
+        return 0  # a tray runs already
+    trays: list[XembedTray | SniTray] = []
 
     def on_activate(_app: Gtk.Application) -> None:
-        activations[0] += 1
-        # A tray instance is activated once by its own start: that one opens nothing.
-        if mode == "settings" or activations[0] > 1:
-            gui.show_settings()
+        if trays:  # started again while running: show the settings, as a click would
+            open_settings_window()
+            return
+        trays.append(
+            tray_class(
+                client or ControlClient(),
+                open_settings=open_settings_window,
+                quit=app.quit,
+            )
+        )
+        app.hold()
 
-    def start_tray() -> bool:
-        from .sni import watcher_present
-
-        backend = choose_backend(env, watcher_present=watcher_present())
-        if gui.start_tray(backend):
-            return True
-        print(NO_TRAY_HINT, file=sys.stderr)
-        return False
-
-    app.lookup_action("start-tray").connect("activate", lambda *_args: start_tray())
     app.connect("activate", on_activate)
-    if mode == "tray" and not start_tray():
-        return 0
     for signum in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, _quit_app, app)
     return app.run([])
-
-
-def run_tray(client: ControlClient | None = None) -> int:
-    return run_gui("tray", client)
-
-
-def run_settings(client: ControlClient | None = None) -> int:
-    return run_gui("settings", client)
 
 
 def _quit_app(app: Gtk.Application) -> bool:

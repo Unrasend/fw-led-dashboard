@@ -20,18 +20,27 @@ from framework_led_dashboard.app import (
     DashboardSnapshot,
     DashboardState,
     Loop,
-    MicrophoneWatch,
     PanelWorker,
     SensorSampler,
+    SoundWatch,
     WeatherUpdater,
     panel_targets,
-    render_left,
-    render_right,
+    render_side,
     run_dashboard,
-    side_renderer,
+    wanted_capture,
 )
+from framework_led_dashboard.audio import CaptureRequest, Spectrum
 from framework_led_dashboard.config import AlertsConfig, ConfigError, DashboardConfig, parse_config
 from framework_led_dashboard.control import ControlError, DisplaySettings
+from framework_led_dashboard.layout import (
+    Layout,
+    bars,
+    classic_left,
+    classic_right,
+    equalizer,
+    temperature,
+    weather,
+)
 from framework_led_dashboard.left_panel import render_left_panel
 from framework_led_dashboard.location import Coordinates, LocationSource
 from framework_led_dashboard.matrix_transport import (
@@ -40,6 +49,7 @@ from framework_led_dashboard.matrix_transport import (
     brightness_command,
     sleep_command,
 )
+from framework_led_dashboard.panel_render import PanelData, render_panel
 from framework_led_dashboard.right_panel import render_right_panel
 from framework_led_dashboard.system_metrics import SystemMetrics
 from framework_led_dashboard.weather import WeatherProvider, WeatherReading
@@ -48,6 +58,8 @@ PRAGUE = Coordinates(50.08, 14.43, LocationSource.IP)
 CLEAR_NIGHT = WeatherReading(-1.0, 0, False)
 METRICS = SystemMetrics(battery_percent=78, cpu_percent=35, ram_used_percent=62)
 LEVELS = (0.3,) * 9
+MONO = Spectrum(LEVELS, LEVELS)
+CLASSIC = Layout(left=classic_left(), right=classic_right())
 CONFIGURED = parse_config({"panels": {"left": {"identity": "L"}, "right": {"identity": "R"}}})
 ON = DisplaySettings(40)
 OFF = DisplaySettings(40, enabled=False)
@@ -98,19 +110,19 @@ class FakeTransport:
         self.closed = True
 
 
-class FakeMicrophone:
+class FakeSound:
     def __init__(self) -> None:
-        self.current: tuple[float, ...] | None = None
-        self.started = False
+        self.current: Spectrum | None = None
+        self.requests: list[CaptureRequest] = []
         self.stopped = False
 
-    def start(self) -> None:
-        self.started = True
+    def start(self, request: CaptureRequest) -> None:
+        self.requests.append(request)
 
     def stop(self) -> None:
         self.stopped = True
 
-    def levels(self) -> tuple[float, ...] | None:
+    def levels(self) -> Spectrum | None:
         return self.current
 
 
@@ -154,7 +166,7 @@ def test_panel_targets_send_each_side_to_its_configured_identity() -> None:
 
 
 def test_panel_targets_stay_physical_when_the_config_swaps_panels() -> None:
-    # The configured swap is only the starting value of the live setting (side_renderer).
+    # The configured swap is only the starting value of the live setting (render_side).
     swapped = parse_config(
         {"swap_panels": True, "panels": {"left": {"identity": "L"}, "right": {"identity": "R"}}}
     )
@@ -162,81 +174,90 @@ def test_panel_targets_stay_physical_when_the_config_swaps_panels() -> None:
     assert panel_targets(swapped) == {"left": "L", "right": "R"}
 
 
-def test_side_renderer_swaps_content_as_soon_as_the_setting_changes() -> None:
-    current = {"settings": DisplaySettings(40)}
-    bars_frame = ((1,),)
-    weather_frame = ((2,),)
-    renderers = {
-        side: side_renderer(
-            side,
-            settings=lambda: current["settings"],
-            left=lambda _now: bars_frame,
-            right=lambda _now: weather_frame,
-        )
-        for side in ("left", "right")
-    }
-
-    assert renderers["left"](0.0) == bars_frame
-    assert renderers["right"](0.0) == weather_frame
-
-    current["settings"] = DisplaySettings(40, swap_panels=True)
-
-    assert renderers["left"](0.1) == weather_frame
-    assert renderers["right"](0.1) == bars_frame
-
-
-def test_side_renderer_rejects_an_unknown_side() -> None:
-    with pytest.raises(ValueError, match="side"):
-        side_renderer(
-            "middle", settings=lambda: DisplaySettings(40), left=lambda _n: (), right=lambda _n: ()
-        )
-
-
 def test_panel_targets_require_both_identities() -> None:
     with pytest.raises(ConfigError, match="identity"):
         panel_targets(parse_config({"panels": {"left": {"identity": "L"}}}))
 
 
-def test_left_render_uses_snapshot_spectrum_and_blink_phase() -> None:
-    alerts = AlertState(battery=True)
-    snapshot = DashboardSnapshot(metrics=METRICS, alerts=alerts)
-
-    shown = render_left(snapshot, LEVELS, 0.2)
-    hidden = render_left(snapshot, LEVELS, 0.7)
-
-    expected_shown = render_left_panel(METRICS, spectrum=LEVELS, alerts=alerts, blink_on=True)
-    expected_hidden = render_left_panel(METRICS, spectrum=LEVELS, alerts=alerts, blink_on=False)
-    assert shown == expected_shown.snapshot()
-    assert hidden == expected_hidden.snapshot()
-    assert shown != hidden
-
-
-def test_left_render_uses_the_bars_chosen_in_settings() -> None:
-    metrics = SystemMetrics(battery_percent=10, cpu_percent=20, ram_used_percent=30, gpu_percent=90)
-    snapshot = DashboardSnapshot(metrics=metrics)
-
-    actual = render_left(snapshot, None, 0.2, bars=("gpu", "cpu", "ram"))
-
-    expected = render_left_panel(metrics, bars=("gpu", "cpu", "ram"), spectrum=None)
-    assert actual == expected.snapshot()
-    assert actual != render_left(snapshot, None, 0.2)
-
-
-def test_right_render_animates_weather_at_two_fps_and_blinks_cpu_temperature() -> None:
-    alerts = AlertState(cpu_temperature=True)
-    snapshot = DashboardSnapshot(cpu_temperature_c=120, weather=CLEAR_NIGHT, alerts=alerts)
-
-    actual = render_right(snapshot, None, 1.7)
-
-    expected = render_right_panel(
-        cpu_temperature_c=120,
-        weather=CLEAR_NIGHT,
-        weather_frame=3,
-        spectrum=None,
-        alerts=alerts,
-        blink_on=False,
+def test_render_side_draws_the_classic_layout_like_the_old_panels() -> None:
+    alerts = AlertState(battery=True, cpu_temperature=True)
+    snapshot = DashboardSnapshot(
+        metrics=METRICS, cpu_temperature_c=120, weather=CLEAR_NIGHT, alerts=alerts
     )
-    assert actual == expected.snapshot()
+    settings = DisplaySettings(40, layout=CLASSIC)
+
+    for elapsed, visible in ((0.2, True), (0.7, False)):
+        left = render_side("left", settings, snapshot, MONO, elapsed)
+        assert left == render_left_panel(
+            METRICS, spectrum=LEVELS, alerts=alerts, blink_on=visible
+        ).snapshot()
+    right = render_side("right", settings, snapshot, None, 1.7)
+    assert right == render_right_panel(
+        cpu_temperature_c=120, weather=CLEAR_NIGHT, weather_frame=3, alerts=alerts, blink_on=False
+    ).snapshot()
+
+
+def test_render_side_swaps_the_widgets_but_keeps_each_modules_channel_and_mirroring() -> None:
+    snapshot = DashboardSnapshot(metrics=METRICS, weather=CLEAR_NIGHT)
+    stereo = Spectrum((0.9,) + (0.0,) * 8, (0.0,) * 8 + (0.9,))
+    swapped = DisplaySettings(40, layout=CLASSIC, swap_panels=True)
+    data = PanelData(metrics=METRICS, weather=CLEAR_NIGHT)
+
+    left = render_side("left", swapped, snapshot, stereo, 0.2)
+    right = render_side("right", swapped, snapshot, stereo, 0.2)
+
+    assert left == render_panel(
+        CLASSIC.right, data, spectrum=stereo.left, mirrored=True, weather_frame=0
+    ).snapshot()
+    assert right == render_panel(CLASSIC.left, data, spectrum=stereo.right).snapshot()
+
+
+def test_render_side_shows_the_gpu_temperature_where_the_layout_puts_it() -> None:
+    layout = Layout(left=(temperature("gpu"),), right=(temperature("cpu"),))
+    snapshot = DashboardSnapshot(cpu_temperature_c=92, gpu_temperature_c=63)
+
+    left = render_side("left", DisplaySettings(40, layout=layout), snapshot, None, 0.0)
+
+    assert left == render_panel(layout.left, PanelData(gpu_temperature_c=63)).snapshot()
+    assert left != render_panel(layout.left, PanelData(gpu_temperature_c=64)).snapshot()
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        (DisplaySettings(40, enabled=False), None),
+        (DisplaySettings(40), CaptureRequest("microphone", 1)),
+        (DisplaySettings(40, audio_source="system"), CaptureRequest("system", 2)),
+        (
+            DisplaySettings(
+                40, audio_source="system", layout=Layout(left=(equalizer(),), right=(weather(),))
+            ),
+            CaptureRequest("system", 1),
+        ),
+        (DisplaySettings(40, layout=Layout(left=(bars(),), right=(weather(),))), None),
+    ],
+)
+def test_wanted_capture_follows_the_panels_the_equalizers_and_the_source(
+    settings: DisplaySettings, expected: CaptureRequest | None
+) -> None:
+    assert wanted_capture(settings) == expected
+
+
+def test_sensor_sampler_publishes_the_gpu_temperature() -> None:
+    state = DashboardState()
+    sampler = SensorSampler(
+        state,
+        read_metrics=lambda: METRICS,
+        read_cpu_temperature=lambda: 70.0,
+        read_gpu_temperature=lambda: 55.0,
+        alert_policy=AlertPolicy(AlertsConfig()),
+        interval_seconds=1.0,
+        clock=FakeClock(),
+    )
+
+    sampler.step()
+
+    assert state.snapshot().gpu_temperature_c == 55.0
 
 
 def test_sensor_sampler_publishes_metrics_and_alerts_without_touching_weather() -> None:
@@ -530,81 +551,86 @@ def test_panel_worker_shutdown_tolerates_an_unreachable_panel() -> None:
     assert transport.closed is True
 
 
-def test_microphone_watch_logs_only_availability_changes(caplog: pytest.LogCaptureFixture) -> None:
-    microphone = FakeMicrophone()
-    watch = MicrophoneWatch(microphone, interval_seconds=1.0, startup_grace_seconds=0)
-
-    with caplog.at_level(logging.INFO):
-        for current in (None, None, LEVELS, LEVELS, None):
-            microphone.current = current
-            assert watch.step() == 1.0
-
-    assert _messages(caplog) == [
-        "microphone unavailable, equalizer dark",
-        "microphone available",
-        "microphone unavailable, equalizer dark",
-    ]
-
-
-def test_microphone_watch_releases_the_microphone_while_the_panels_are_off(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    microphone = FakeMicrophone()
-    microphone.current = LEVELS
-    panels_on = [True]
-    now = [0.0]
-    watch = MicrophoneWatch(
-        microphone,
-        wanted=lambda: panels_on[0],
-        startup_grace_seconds=2.0,
-        clock=lambda: now[0],
+def test_sound_watch_logs_only_availability_changes(caplog: pytest.LogCaptureFixture) -> None:
+    sound = FakeSound()
+    watch = SoundWatch(
+        sound, wanted=lambda: CaptureRequest(), interval_seconds=1.0, startup_grace_seconds=0
     )
 
     with caplog.at_level(logging.INFO):
-        now[0] = 2.0
-        watch.step()  # running since Dashboard.start(), past its grace: judged
-        panels_on[0] = False
-        now[0] = 3.0
-        watch.step()
-        assert microphone.stopped is True
-        microphone.current = None  # stopped: no levels, but no "unavailable" either
-        now[0] = 9.0
-        watch.step()
-        microphone.started = False
-        panels_on[0] = True
-        now[0] = 10.0
-        watch.step()  # restarted, within its grace: not judged yet
-        assert microphone.started is True
-        now[0] = 12.0
-        microphone.current = LEVELS
-        watch.step()
+        for current in (None, None, MONO, MONO, None):
+            sound.current = current
+            assert watch.step() == 1.0
 
+    assert sound.requests == [CaptureRequest()]
     assert _messages(caplog) == [
-        "microphone available",
-        "panels off: microphone released",
-        "panels on: microphone capture resumed",
-        "microphone available",
+        "capturing the microphone",
+        "sound unavailable, equalizer dark",
+        "sound available",
+        "sound unavailable, equalizer dark",
     ]
 
 
-def test_microphone_watch_gives_a_slow_capture_its_grace_before_calling_it_dark(
+def test_sound_watch_stops_while_nothing_needs_sound_and_follows_the_source(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    microphone = FakeMicrophone()
+    sound = FakeSound()
+    sound.current = MONO
+    wanted: list[CaptureRequest | None] = [CaptureRequest()]
     now = [0.0]
-    watch = MicrophoneWatch(microphone, startup_grace_seconds=2.0, clock=lambda: now[0])
+    watch = SoundWatch(
+        sound, wanted=lambda: wanted[0], startup_grace_seconds=2.0, clock=lambda: now[0]
+    )
 
     with caplog.at_level(logging.INFO):
+        watch.step()  # starts, within its grace: not judged yet
+        now[0] = 2.0
+        watch.step()
+        wanted[0] = None  # panels off, or no equalizer left
+        now[0] = 3.0
+        watch.step()
+        assert sound.stopped is True
+        sound.current = None  # stopped: no levels, but no "unavailable" either
+        now[0] = 9.0
+        watch.step()
+        wanted[0] = CaptureRequest("system", 2)
+        now[0] = 10.0
+        watch.step()  # restarted, within its grace: not judged yet
+        now[0] = 12.0
+        sound.current = MONO
+        watch.step()
+
+    assert sound.requests == [CaptureRequest(), CaptureRequest("system", 2)]
+    assert _messages(caplog) == [
+        "capturing the microphone",
+        "sound available",
+        "sound capture stopped",
+        "capturing the system sound in stereo",
+        "sound available",
+    ]
+
+
+def test_sound_watch_gives_a_slow_capture_its_grace_before_calling_it_dark(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sound = FakeSound()
+    now = [0.0]
+    watch = SoundWatch(
+        sound, wanted=lambda: CaptureRequest(), startup_grace_seconds=2.0, clock=lambda: now[0]
+    )
+
+    with caplog.at_level(logging.INFO):
+        watch.step()
         now[0] = 1.0
         watch.step()
         now[0] = 2.0
         watch.step()
 
-    assert _messages(caplog) == ["microphone unavailable, equalizer dark"]
+    assert _messages(caplog) == ["capturing the microphone", "sound unavailable, equalizer dark"]
 
 
 def test_dashboard_stop_shuts_panels_down_after_their_loops_end() -> None:
-    microphone = FakeMicrophone()
+    sound = FakeSound()
     stepped = threading.Event()
     events: list[str] = []
 
@@ -615,15 +641,14 @@ def test_dashboard_stop_shuts_panels_down_after_their_loops_end() -> None:
     dashboard = Dashboard(
         panels=((Loop("panel-left", step), lambda: events.append("panel shutdown")),),
         background=(Loop("sensors", lambda: 0.01),),
-        microphone=microphone,
+        sound=sound,
         on_stop=(lambda: events.append("control closed"),),
     )
     dashboard.start()
     assert stepped.wait(1.0)
     dashboard.stop()
 
-    assert microphone.started is True
-    assert microphone.stopped is True
+    assert sound.stopped is True
     assert events == ["panel shutdown", "control closed"]
 
 

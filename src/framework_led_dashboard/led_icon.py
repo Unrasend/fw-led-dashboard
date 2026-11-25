@@ -112,3 +112,15 @@ def _unpremultiply(pixels: list[float]) -> list[int]:
         out.extend(round(min(1.0, pixels[index + channel] / alpha) * 255) for channel in range(3))
         out.append(round(alpha * 255))
     return out
+
+
+def icon_pixbuf(state: str, size: int):  # -> GdkPixbuf.Pixbuf; GTK is imported only here
+    import gi
+
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf, GLib
+
+    data = GLib.Bytes.new(icon_rgba(state, size))
+    return GdkPixbuf.Pixbuf.new_from_bytes(
+        data, GdkPixbuf.Colorspace.RGB, True, 8, size, size, size * 4
+    )

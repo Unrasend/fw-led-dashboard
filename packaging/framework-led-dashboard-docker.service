@@ -1,0 +1,23 @@
+[Unit]
+Description=Framework 16 LED Matrix dashboard (both panels), in Docker
+# Starts with your session, like the plain service: the sound sockets and the folder for the
+# control socket exist only then (a container Docker starts at boot would find neither).
+Wants=pipewire-pulse.socket
+After=pipewire.service pipewire-pulse.service pipewire-pulse.socket
+
+[Service]
+Type=exec
+# Runs `docker run` in the foreground; SIGTERM reaches the daemon, which blanks the panels.
+ExecStart=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker
+ExecStopPost=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker --remove
+SyslogIdentifier=framework-led-dashboard
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=60s
+# 2 = configuration error: restarting cannot fix it.
+RestartPreventExitStatus=2
+TimeoutStopSec=20s
+
+[Install]
+WantedBy=default.target
