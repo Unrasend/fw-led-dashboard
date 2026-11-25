@@ -23,6 +23,7 @@
   <header class="top">
     <a class="brand" href="./"><span class="brand-mark" aria-hidden="true"></span>fw-led-dashboard</a>
     <nav aria-label="Page">
+      <a href="#settings">Settings</a>
       <a href="#install">Install</a>
       <a href="#weather">Weather icons</a>
       <a href="https://github.com/Unrasend/fw-led-dashboard">GitHub</a>
@@ -83,6 +84,36 @@
         </figcaption>
         <noscript><p class="noscript">The live panels need JavaScript; the
           <a href="https://github.com/Unrasend/fw-led-dashboard#readme">README</a> has a still preview.</p></noscript>
+      </figure>
+    </section>
+
+    <section id="settings" class="settings">
+      <div class="settings-text">
+        <h2>Arrange it yourself</h2>
+        <p class="lead">
+          <em>LED Matrix Dashboard</em> in the application menu opens a small settings window
+          that draws both modules LED for LED, as they look right now, with an outline around
+          each widget.
+        </p>
+        <ul class="points">
+          <li><strong>Click a widget</strong> to change it: where a temperature comes from, what
+            each bar shows and when it blinks, what the equalizer listens to, how tall it is.</li>
+          <li><strong>Drag it</strong> onto empty rows to put it exactly there, between other
+            widgets to move it, or onto the other module.</li>
+          <li><strong>Drag its top or bottom edge</strong> to resize bars, the equalizer or a
+            space.</li>
+          <li><strong>Add</strong> a weather icon, a temperature, bars, an equalizer, a line or
+            space; <em>Delete</em> removes one, <em>Reset layout</em> starts over.</li>
+        </ul>
+        <p class="muted">
+          Every change shows on the modules at once and is kept. The window is a process of its
+          own that exits when you close it, so it takes no memory the rest of the time; the tray
+          icon keeps on/off, brightness and the panel swap at hand.
+        </p>
+      </div>
+      <figure class="settings-shot">
+        <img src="settings-window.png" width="758" height="840" loading="lazy"
+          alt="The settings window: both LED Matrix modules drawn LED for LED with outlines around their widgets, the bars selected, and on the right the source and blink rule of each bar and its height">
       </figure>
     </section>
 

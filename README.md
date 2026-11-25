@@ -33,8 +33,8 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
   battery at 10 % and less. The CPU temperature blinks from 120 °C (set your own); an
   outside-temperature range is optional.
 - **Settings window (GTK 3):** both modules drawn LED for LED with what they show right now;
-  click a widget to change it, drag it to move it, drag its bottom edge to resize it. It runs
-  only while it is open.
+  click a widget to change it, drag it to move it, drag its top or bottom edge to resize it.
+  It runs only while it is open — [see it below](#using-it).
 - **Tray icon:** on/off, brightness and *Swap panels*. It works in KDE Plasma (X11 and
   Wayland), GNOME (with the AppIndicator extension, which Ubuntu ships and the installer can
   add), XFCE, Cinnamon, MATE and others; the *LED Matrix Dashboard* window from the
@@ -161,6 +161,10 @@ The *Disk* bar shows the file system Docker keeps its containers on. PipeWire is
 is on every current desktop distribution).
 
 ## Using it
+
+<p align="center">
+  <img src="docs/settings-window.png" width="560" alt="The settings window: both LED Matrix modules drawn LED for LED with outlines around their widgets, the bars selected, and on the right the source and blink rule of each bar and its height">
+</p>
 
 **Settings window** — *LED Matrix Dashboard* in the application menu, or *Settings…* in the
 tray. On top: on/off, a brightness slider and *Swap panels*. Below, both modules as they look
@@ -333,6 +337,13 @@ default layout; re-render it with pycairo and Pillow installed:
 
 ```bash
 PYTHONPATH=src python3 scripts/build_readme_gif.py
+```
+
+The settings window screenshot (`docs/settings-window.png`) is the real window with made-up
+data, drawn off screen; `broadwayd :7` keeps it off your desktop:
+
+```bash
+GDK_BACKEND=broadway BROADWAY_DISPLAY=:7 PYTHONPATH=src python3 scripts/build_settings_screenshot.py
 ```
 
 ## License
