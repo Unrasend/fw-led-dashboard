@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .config import AlertsConfig
@@ -37,10 +38,25 @@ class AlertState:
 
 
 class AlertPolicy:
-    """Evaluate sensor values without reading clocks, devices or global state."""
+    """Evaluate sensor values without reading clocks, devices or global state.
 
-    def __init__(self, config: AlertsConfig) -> None:
+    `cpu_temperature_critical`, when given, is asked for the CPU threshold on every update
+    (the tray can change it); recovery then stays the configured distance below it.
+    """
+
+    def __init__(
+        self,
+        config: AlertsConfig,
+        *,
+        cpu_temperature_critical: Callable[[], float] | None = None,
+    ) -> None:
         self._config = config
+        self._cpu_critical = cpu_temperature_critical or (
+            lambda: config.cpu_temperature_critical_c
+        )
+        self._cpu_recovery_gap = (
+            config.cpu_temperature_critical_c - config.cpu_temperature_recovery_c
+        )
         self._state = AlertState()
         self._ram_low_since: float | None = None
 
@@ -60,12 +76,7 @@ class AlertPolicy:
                 self._config.cpu_usage_critical_percent,
             ),
             ram=self._update_ram(inputs.ram_available_percent, now_seconds),
-            cpu_temperature=_high_with_hysteresis(
-                inputs.cpu_temperature_c,
-                active=self._state.cpu_temperature,
-                critical=self._config.cpu_temperature_critical_c,
-                recovery=self._config.cpu_temperature_recovery_c,
-            ),
+            cpu_temperature=self._cpu_temperature_alert(inputs.cpu_temperature_c),
             outside_temperature=_outside_range(
                 inputs.outside_temperature_c,
                 minimum=self._config.outside_temperature_min_c,
@@ -73,6 +84,15 @@ class AlertPolicy:
             ),
         )
         return self._state
+
+    def _cpu_temperature_alert(self, temperature_c: float | None) -> bool:
+        critical = self._cpu_critical()
+        return _high_with_hysteresis(
+            temperature_c,
+            active=self._state.cpu_temperature,
+            critical=critical,
+            recovery=critical - self._cpu_recovery_gap,
+        )
 
     def _update_ram(self, available_percent: float | None, now_seconds: float) -> bool:
         if not _is_known(available_percent):

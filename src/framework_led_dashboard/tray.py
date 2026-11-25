@@ -2,8 +2,9 @@
 
 Left click opens a native GTK menu styled by the desktop theme, like the XFCE PulseAudio
 plugin's popup: an On/Off switch, a brightness slider, a switch that swaps what the two panels
-show, and one submenu per bar to choose its data source (each source has a tooltip saying
-where the data comes from).
+show, one submenu per bar to choose its data source (each source has a tooltip saying
+where the data comes from), and the temperature at which the CPU value starts to blink
+(typed into a small dialog: a GTK menu cannot take keyboard input).
 Right click offers Quit. The tray only talks to the dashboard through its control socket, so
 quitting the tray never touches the panels.
 """
@@ -23,7 +24,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 from .bar_sources import BAR_COUNT, BAR_SOURCES
-from .control import ControlClient, ControlError, DisplaySettings, bars_side
+from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
+from .control import ControlClient, ControlError, DisplaySettings, bars_side, weather_side
 
 # Gtk.StatusIcon is deprecated, but it is the GTK 3 icon that reports clicks and its position;
 # XFCE's tray still shows it (XEmbed).
@@ -42,6 +44,7 @@ SWAP_HINT = (
     "Show the bars on the right panel and the weather on the left.\n"
     "Also puts things right if the panels were detected the wrong way round."
 )
+CPU_ALERT_HINT = "The CPU temperature blinks from this value on. Click to change it."
 ICON_BAR_HEIGHTS = (3, 6, 4)
 ICON_DOT_ROWS = 7
 
@@ -208,6 +211,64 @@ class BarMenuItem(Gtk.MenuItem):
             self._on_choose(self.slot, key)
 
 
+class CpuAlertDialog(Gtk.Dialog):
+    """Number input for the CPU temperature alert."""
+
+    def __init__(self, *, celsius: float, side: str) -> None:
+        super().__init__(title="CPU temperature alert")
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_position(Gtk.WindowPosition.MOUSE)
+        self.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Apply", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+
+        adjustment = Gtk.Adjustment(
+            value=round(celsius),
+            lower=CPU_ALERT_MIN_CELSIUS,
+            upper=CPU_ALERT_MAX_CELSIUS,
+            step_increment=1,
+            page_increment=5,
+        )
+        self.spin = Gtk.SpinButton(adjustment=adjustment, climb_rate=1, digits=0)
+        self.spin.set_numeric(True)
+        self.spin.set_activates_default(True)  # Enter applies
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.pack_start(
+            Gtk.Label(label=f"Blink the CPU temperature on the {side} panel at", xalign=0),
+            False,
+            False,
+            0,
+        )
+        row.pack_start(self.spin, False, False, 0)
+        row.pack_start(Gtk.Label(label="°C"), False, False, 0)
+        hint = Gtk.Label(xalign=0)
+        hint.set_markup(
+            "<small>"
+            + GLib.markup_escape_text(
+                f"From {CPU_ALERT_MIN_CELSIUS} to {CPU_ALERT_MAX_CELSIUS} °C. It stops blinking "
+                "once the temperature is a little lower again (5 °C unless config.toml says "
+                "otherwise)."
+            )
+            + "</small>"
+        )
+        hint.set_line_wrap(True)
+        hint.set_max_width_chars(48)
+        hint.get_style_context().add_class("dim-label")
+
+        content = self.get_content_area()
+        content.set_spacing(10)
+        content.set_border_width(12)
+        content.pack_start(row, False, False, 0)
+        content.pack_start(hint, False, False, 0)
+        content.show_all()
+
+    @property
+    def celsius(self) -> int:
+        self.spin.update()  # take a number that was typed but not yet confirmed
+        return self.spin.get_value_as_int()
+
+
 class TrayController:
     def __init__(self, client: ControlClient) -> None:
         self._client = client
@@ -238,6 +299,10 @@ class TrayController:
             "What each bar shows. Hover a source to see where its data comes from."
         )
         self._bars = [BarMenuItem(slot, self._on_bar_chosen) for slot in range(BAR_COUNT)]
+        self._cpu_alert = Gtk.MenuItem(label="CPU alert…")
+        self._cpu_alert.set_tooltip_text(CPU_ALERT_HINT)
+        self._cpu_alert.connect("activate", self._open_cpu_alert)
+        self._alert_dialog: CpuAlertDialog | None = None
         for item in (
             self._unreachable,
             self._power,
@@ -246,6 +311,8 @@ class TrayController:
             Gtk.SeparatorMenuItem(),
             self._bars_title,
             *self._bars,
+            Gtk.SeparatorMenuItem(),
+            self._cpu_alert,
         ):
             self._menu.append(item)
         self._menu.show_all()
@@ -299,7 +366,7 @@ class TrayController:
         self._settings = settings
         reachable = settings is not None
         self._unreachable.set_visible(not reachable)
-        for item in (self._power, self._brightness, self._swap, *self._bars):
+        for item in (self._power, self._brightness, self._swap, *self._bars, self._cpu_alert):
             item.set_sensitive(reachable)
         if settings is None:
             self._set_icon("unreachable", "LED Matrix: dashboard is not running")
@@ -314,6 +381,7 @@ class TrayController:
         self._bars_title.set_label(f"{side.capitalize()} panel bars")
         for item, key in zip(self._bars, settings.bars, strict=True):
             item.show_source(key, side=side)
+        self._cpu_alert.set_label(f"CPU alert: {settings.cpu_alert_celsius:g} °C…")
         state = "on" if settings.enabled else "off"
         sources = ", ".join(BAR_SOURCES[key].label for key in settings.bars)
         self._set_icon(
@@ -336,6 +404,23 @@ class TrayController:
     def _on_power_switched(self, switch: Gtk.Switch, _property: object) -> None:
         if not self._updating:
             self._apply(enabled=switch.get_active())
+
+    def _open_cpu_alert(self, _item: Gtk.MenuItem) -> None:
+        if self._settings is None:
+            return
+        if self._alert_dialog is None:
+            self._alert_dialog = CpuAlertDialog(
+                celsius=self._settings.cpu_alert_celsius, side=weather_side(self._settings)
+            )
+            self._alert_dialog.connect("response", self._on_cpu_alert_response)
+        self._alert_dialog.present_with_time(Gtk.get_current_event_time())
+        self._alert_dialog.spin.grab_focus()  # selects the number, so typing replaces it
+
+    def _on_cpu_alert_response(self, dialog: CpuAlertDialog, response: int) -> None:
+        if response == Gtk.ResponseType.OK:
+            self._apply(cpu_alert_celsius=dialog.celsius)
+        dialog.destroy()
+        self._alert_dialog = None
 
     def _on_swap_switched(self, switch: Gtk.Switch, _property: object) -> None:
         if not self._updating:

@@ -264,6 +264,28 @@ def test_sensor_sampler_publishes_metrics_and_alerts_without_touching_weather() 
     assert state.snapshot().alerts.ram is True
 
 
+def test_sensor_sampler_logs_when_an_alert_starts_and_stops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    temperatures = iter((100.0, 121.0, 121.5, 114.0))
+    sampler = SensorSampler(
+        DashboardState(),
+        read_metrics=lambda: METRICS,
+        read_cpu_temperature=lambda: next(temperatures),
+        alert_policy=AlertPolicy(AlertsConfig()),
+        interval_seconds=1,
+    )
+
+    with caplog.at_level(logging.INFO):
+        for _ in range(4):
+            sampler.step()
+
+    assert _messages(caplog) == [
+        "cpu temperature alert on (121 °C)",
+        "cpu temperature alert off (114 °C)",
+    ]
+
+
 def test_sensor_sampler_feeds_outside_temperature_to_alert_policy() -> None:
     state = DashboardState()
     state.update(weather=WeatherReading(-25.0, 0, False))

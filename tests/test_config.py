@@ -128,6 +128,11 @@ def test_rejects_duplicate_panel_identity_after_normalization() -> None:
             "ram_available_recovery_percent",
         ),
         ({"ram_critical_seconds": 0}, "ram_critical_seconds"),
+        (
+            {"cpu_temperature_critical_c": 39, "cpu_temperature_recovery_c": 30},
+            "between 40 and 150",
+        ),
+        ({"cpu_temperature_critical_c": 151}, "cpu_temperature_critical_c"),
         ({"cpu_usage_critical_percent": 101}, "cpu_usage_critical_percent"),
         (
             {"outside_temperature_min_c": 30, "outside_temperature_max_c": 20},

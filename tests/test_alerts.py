@@ -22,6 +22,25 @@ def test_cpu_temperature_enters_at_120_and_recovers_only_below_115() -> None:
     ]
 
 
+def test_cpu_temperature_follows_a_threshold_changed_at_runtime_with_the_configured_gap() -> None:
+    threshold = [120.0]
+    policy = AlertPolicy(
+        AlertsConfig(cpu_temperature_critical_c=120, cpu_temperature_recovery_c=117),
+        cpu_temperature_critical=lambda: threshold[0],
+    )
+
+    def alert(value: float, at: int) -> bool:
+        return policy.update(AlertInputs(cpu_temperature_c=value), now_seconds=at).cpu_temperature
+
+    assert alert(95, 0) is False
+    threshold[0] = 90  # set from the tray
+    assert alert(95, 1) is True
+    assert alert(88, 2) is True  # still above 90 - 3
+    assert alert(86.9, 3) is False
+    threshold[0] = 100
+    assert alert(95, 4) is False
+
+
 def test_battery_enters_at_ten_percent_and_recovers_at_twelve_percent() -> None:
     policy = AlertPolicy(AlertsConfig())
 

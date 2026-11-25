@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The CPU temperature alert, set here or in the tray, stays within this range.
+CPU_ALERT_MIN_CELSIUS = 40
+CPU_ALERT_MAX_CELSIUS = 150
+
 
 class ConfigError(ValueError):
     """Raised when dashboard configuration is internally inconsistent."""
@@ -243,6 +247,11 @@ def _parse_alerts(raw: Mapping[str, Any]) -> AlertsConfig:
     _reject_unknown(raw, allowed_keys, "alerts")
 
     cpu_critical = _number(raw, "cpu_temperature_critical_c", 120, "alerts")
+    if not CPU_ALERT_MIN_CELSIUS <= cpu_critical <= CPU_ALERT_MAX_CELSIUS:
+        raise ConfigError(
+            f"alerts.cpu_temperature_critical_c must be between {CPU_ALERT_MIN_CELSIUS} and "
+            f"{CPU_ALERT_MAX_CELSIUS}"
+        )
     cpu_recovery = _number(raw, "cpu_temperature_recovery_c", 115, "alerts")
     if cpu_recovery >= cpu_critical:
         raise ConfigError("alerts.cpu_temperature_recovery_c must be below the critical value")

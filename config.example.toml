@@ -26,6 +26,8 @@ metrics_seconds = 1
 weather_seconds = 900
 
 [alerts]
+# The CPU threshold is only the starting value: the tray's "CPU alert" item changes it and
+# remembers it. It stops blinking (critical - recovery) degrees lower, 5 °C here.
 cpu_temperature_critical_c = 120
 cpu_temperature_recovery_c = 115
 battery_critical_percent = 10

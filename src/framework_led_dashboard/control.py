@@ -3,7 +3,8 @@
 Protocol: one JSON object per line, one request per connection.
   {"command": "status"}
   {"command": "set", "brightness_percent": 60, "enabled": false}   (every field optional)
-Settable fields: brightness_percent, enabled, bars (3 source names), swap_panels.
+Settable fields: brightness_percent, enabled, bars (3 source names), swap_panels,
+cpu_alert_celsius.
 Answer: {"ok": true, <every field>} or {"ok": false, "error": "..."}.
 """
 
@@ -19,6 +20,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .bar_sources import DEFAULT_BARS, validate_bars
+from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
 from .scheduler import LOGGER
 
 MAX_MESSAGE_BYTES = 4096
@@ -26,7 +28,10 @@ SOCKET_NAME = "framework-led-dashboard.sock"
 CONNECTION_TIMEOUT_SECONDS = 1.0
 
 
-SETTABLE_FIELDS = frozenset({"brightness_percent", "enabled", "bars", "swap_panels"})
+SETTABLE_FIELDS = frozenset(
+    {"brightness_percent", "enabled", "bars", "swap_panels", "cpu_alert_celsius"}
+)
+DEFAULT_CPU_ALERT_CELSIUS = 120
 
 
 class ControlError(OSError):
@@ -39,6 +44,7 @@ class DisplaySettings:
     enabled: bool = True
     bars: tuple[str, ...] = DEFAULT_BARS
     swap_panels: bool = False  # bars on the right panel, weather on the left
+    cpu_alert_celsius: float = DEFAULT_CPU_ALERT_CELSIUS  # the CPU temperature blinks from here
 
     def __post_init__(self) -> None:
         brightness = self.brightness_percent
@@ -53,11 +59,24 @@ class DisplaySettings:
         validate_bars(self.bars)
         if not isinstance(self.swap_panels, bool):
             raise TypeError("swap_panels must be true or false")
+        alert = self.cpu_alert_celsius
+        if isinstance(alert, bool) or not isinstance(alert, (int, float)):
+            raise TypeError("cpu_alert_celsius must be a number")
+        if not CPU_ALERT_MIN_CELSIUS <= alert <= CPU_ALERT_MAX_CELSIUS:  # also rejects NaN
+            raise ValueError(
+                f"cpu_alert_celsius must be between {CPU_ALERT_MIN_CELSIUS} and "
+                f"{CPU_ALERT_MAX_CELSIUS}"
+            )
 
 
 def bars_side(settings: DisplaySettings) -> str:
     """The panel that shows the bars: "left", or "right" when the panels are swapped."""
     return "right" if settings.swap_panels else "left"
+
+
+def weather_side(settings: DisplaySettings) -> str:
+    """The panel that shows the weather and the CPU temperature."""
+    return "left" if settings.swap_panels else "right"
 
 
 def default_socket_path() -> Path:
@@ -95,9 +114,14 @@ class SettingsStore:
         *,
         default_brightness_percent: int,
         default_swap_panels: bool = False,
+        default_cpu_alert_celsius: float = DEFAULT_CPU_ALERT_CELSIUS,
         logger: logging.Logger = LOGGER,
     ) -> SettingsStore:
-        settings = DisplaySettings(default_brightness_percent, swap_panels=default_swap_panels)
+        settings = DisplaySettings(
+            default_brightness_percent,
+            swap_panels=default_swap_panels,
+            cpu_alert_celsius=default_cpu_alert_celsius,
+        )
         try:
             body = path.read_bytes()
             if len(body) > MAX_MESSAGE_BYTES:
@@ -109,8 +133,9 @@ class SettingsStore:
                 raw["brightness_percent"],
                 raw["enabled"],
                 _bars_from_json(raw.get("bars")),
-                # Saved before the tray could swap panels: the config still decides.
+                # Fields saved by an older version are missing: the config still decides.
                 raw.get("swap_panels", default_swap_panels),
+                raw.get("cpu_alert_celsius", default_cpu_alert_celsius),
             )
         except FileNotFoundError:
             pass
@@ -129,6 +154,7 @@ class SettingsStore:
         enabled: bool | None = None,
         bars: tuple[str, ...] | None = None,
         swap_panels: bool | None = None,
+        cpu_alert_celsius: float | None = None,
     ) -> DisplaySettings:
         changes: dict[str, object] = {}
         if brightness_percent is not None:
@@ -139,6 +165,8 @@ class SettingsStore:
             changes["bars"] = bars
         if swap_panels is not None:
             changes["swap_panels"] = swap_panels
+        if cpu_alert_celsius is not None:
+            changes["cpu_alert_celsius"] = cpu_alert_celsius
         with self._lock:
             previous = self._settings
             updated = replace(previous, **changes)
@@ -154,6 +182,8 @@ class SettingsStore:
             self._logger.info("bars: %s", ", ".join(updated.bars))
         if updated.swap_panels != previous.swap_panels:
             self._logger.info("bars on the %s panel", bars_side(updated))
+        if updated.cpu_alert_celsius != previous.cpu_alert_celsius:
+            self._logger.info("CPU temperature alert at %g °C", updated.cpu_alert_celsius)
         return updated
 
     def _save(self, settings: DisplaySettings) -> None:
@@ -185,6 +215,7 @@ def handle_request(store: SettingsStore, request: object) -> dict[str, object]:
                 enabled=request.get("enabled"),
                 bars=None if bars is None else _bars_from_json(bars),
                 swap_panels=request.get("swap_panels"),
+                cpu_alert_celsius=request.get("cpu_alert_celsius"),
             )
         else:
             return _error("command must be 'status' or 'set'")
@@ -276,6 +307,7 @@ class ControlClient:
         enabled: bool | None = None,
         bars: Sequence[str] | None = None,
         swap_panels: bool | None = None,
+        cpu_alert_celsius: float | None = None,
     ) -> DisplaySettings:
         request: dict[str, object] = {"command": "set"}
         if brightness_percent is not None:
@@ -286,6 +318,8 @@ class ControlClient:
             request["bars"] = list(bars)
         if swap_panels is not None:
             request["swap_panels"] = swap_panels
+        if cpu_alert_celsius is not None:
+            request["cpu_alert_celsius"] = cpu_alert_celsius
         return self._request(request)
 
     def _request(self, request: dict[str, object]) -> DisplaySettings:
@@ -310,6 +344,7 @@ class ControlClient:
                 response["enabled"],
                 _bars_from_json(response["bars"]),
                 response["swap_panels"],
+                response["cpu_alert_celsius"],
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ControlError(f"invalid answer from dashboard: {error}") from error

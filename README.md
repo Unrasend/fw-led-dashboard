@@ -20,11 +20,11 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 - **Right panel:** weather for your location (Open-Meteo, no API key), outside temperature,
   CPU temperature and the spectrum.
 - **Alerts:** only the critical value blinks, at 1 Hz, with hysteresis — battery ≤ 10 %,
-  less than 5 % RAM free for 10 s, CPU at 120 °C. CPU-usage and outside-temperature limits are
-  optional.
-- **Tray icon (GTK 3):** on/off switch, brightness slider, *Swap panels* switch and a submenu
-  per bar; every data source has a tooltip saying where its numbers come from. Choices survive
-  restarts.
+  less than 5 % RAM free for 10 s, CPU at 120 °C (set your own in the tray). CPU-usage and
+  outside-temperature limits are optional.
+- **Tray icon (GTK 3):** on/off switch, brightness slider, *Swap panels* switch, a submenu
+  per bar and the CPU alert temperature; every data source has a tooltip saying where its
+  numbers come from. Choices survive restarts.
 - **Runs unattended:** systemd user service; recovers from suspend/resume, USB reconnects,
   PipeWire restarts and network loss (the last weather reading is shown for up to 2 h).
 - **Light:** about 6 frames per second per panel (the firmware's grayscale limit) for about
@@ -106,9 +106,11 @@ or `./install.sh --uninstall` in a checkout.
 
 **Tray icon** (amber when on, grey when off, red dot when the dashboard is not running):
 left click opens the menu — the *LED Matrix* switch, the *Brightness* slider (drag, click or
-scroll), the *Swap panels* switch (bars on the right, weather on the left) and *Left panel bars*
-with one submenu per bar. Right click offers *Quit tray*; quitting the tray never touches the
-panels. Brightness, on/off, the swap and the bar choice are stored in
+scroll), the *Swap panels* switch (bars on the right, weather on the left), *Left panel bars*
+with one submenu per bar, and *CPU alert: 120 °C…*, which opens a box to type the temperature
+at which the CPU value starts blinking (40–150 °C). Right click offers *Quit tray*; quitting
+the tray never touches the panels. Brightness, on/off, the swap, the bar choice and the CPU
+alert are stored in
 `~/.local/state/framework-led-dashboard/display.json`.
 
 **Service:**
@@ -155,7 +157,7 @@ Restart the service after editing it.
 | `location.vpn_interface_prefixes` | `tun, tap, wg, …` | while such an interface is up, IP lookup is skipped |
 | `updates.metrics_seconds` | `1` | local sensors |
 | `updates.weather_seconds` | `900` | weather refresh |
-| `alerts.*` | see example | blink thresholds with separate recovery values |
+| `alerts.*` | see example | blink thresholds with separate recovery values; the tray's *CPU alert* overrides `cpu_temperature_critical_c` and keeps the gap to `cpu_temperature_recovery_c` |
 
 **Location and privacy:** explicit coordinates win. Otherwise the IP-based location is used
 only when no VPN is detected (so a VPN exit country never ends up in the cache), then the last

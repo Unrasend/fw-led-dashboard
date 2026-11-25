@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from types import FrameType
 from typing import Protocol
@@ -178,6 +178,7 @@ class SensorSampler:
         alert_policy: AlertPolicy,
         interval_seconds: float,
         clock: Callable[[], float] = time.monotonic,
+        logger: logging.Logger = LOGGER,
     ) -> None:
         self._state = state
         self._read_metrics = read_metrics
@@ -185,6 +186,7 @@ class SensorSampler:
         self._alert_policy = alert_policy
         self._interval = interval_seconds
         self._clock = clock
+        self._logger = logger
 
     def step(self) -> float:
         metrics = self._read_metrics()
@@ -201,8 +203,23 @@ class SensorSampler:
             ),
             now_seconds=self._clock(),
         )
+        self._log_changes(self._state.snapshot().alerts, alerts, cpu_temperature)
         self._state.update(metrics=metrics, cpu_temperature_c=cpu_temperature, alerts=alerts)
         return self._interval
+
+    def _log_changes(
+        self, previous: AlertState, current: AlertState, cpu_temperature: float | None
+    ) -> None:
+        for field in fields(AlertState):
+            was, now = getattr(previous, field.name), getattr(current, field.name)
+            if was == now:
+                continue
+            detail = ""
+            if field.name == "cpu_temperature" and cpu_temperature is not None:
+                detail = f" ({cpu_temperature:.0f} °C)"
+            self._logger.info(
+                "%s alert %s%s", field.name.replace("_", " "), "on" if now else "off", detail
+            )
 
 
 class WeatherUpdater:
@@ -482,6 +499,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         default_settings_path(),
         default_brightness_percent=config.brightness_percent,
         default_swap_panels=config.swap_panels,
+        default_cpu_alert_celsius=config.alerts.cpu_temperature_critical_c,
     )
     control = ControlServer(store, path=default_socket_path())
     control.open()
@@ -518,7 +536,10 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         state,
         read_metrics=SystemMetricsProvider().read,
         read_cpu_temperature=CpuTemperatureProvider().read_celsius,
-        alert_policy=AlertPolicy(config.alerts),
+        alert_policy=AlertPolicy(
+            config.alerts,
+            cpu_temperature_critical=lambda: store.current().cpu_alert_celsius,
+        ),
         interval_seconds=config.updates.metrics_seconds,
     )
     weather_seconds = config.updates.weather_seconds

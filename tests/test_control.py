@@ -63,6 +63,18 @@ def test_display_settings_reject_invalid_bars(bars: object) -> None:
         DisplaySettings(40, bars=bars)
 
 
+@pytest.mark.parametrize(
+    ("alert", "error"),
+    [(True, TypeError), ("90", TypeError), (39, ValueError), (151, ValueError),
+     (float("nan"), ValueError)],
+)
+def test_display_settings_reject_a_cpu_alert_outside_40_to_150(
+    alert: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error, match="cpu_alert_celsius"):
+        DisplaySettings(40, cpu_alert_celsius=alert)
+
+
 @pytest.mark.parametrize("swap_panels", ["yes", 1, None])
 def test_display_settings_reject_a_swap_that_is_not_a_boolean(swap_panels: object) -> None:
     with pytest.raises(TypeError, match="swap_panels"):
@@ -89,6 +101,7 @@ def test_settings_store_persists_updates_and_reloads_them(tmp_path: Path) -> Non
         "enabled": False,
         "bars": ["battery", "cpu", "ram"],
         "swap_panels": False,
+        "cpu_alert_celsius": 120,
     }
 
 
@@ -140,6 +153,24 @@ def test_settings_store_reads_a_file_saved_before_swapping_existed(tmp_path: Pat
             path, default_brightness_percent=40, default_swap_panels=configured
         ).current()
         assert loaded == DisplaySettings(55, bars=("cpu", "ram", "gpu"), swap_panels=configured)
+
+
+def test_settings_store_starts_with_the_configured_cpu_alert_and_keeps_the_trays(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "display.json"
+    path.write_text(json.dumps({"brightness_percent": 40, "enabled": True}), encoding="utf-8")
+    store = SettingsStore.load(path, default_brightness_percent=40, default_cpu_alert_celsius=110)
+    assert store.current().cpu_alert_celsius == 110  # saved by an older version: config decides
+
+    with caplog.at_level(logging.INFO):
+        store.update(cpu_alert_celsius=92)
+
+    reloaded = SettingsStore.load(
+        path, default_brightness_percent=40, default_cpu_alert_celsius=110
+    )
+    assert reloaded.current().cpu_alert_celsius == 92
+    assert [record.getMessage() for record in caplog.records] == ["CPU temperature alert at 92 °C"]
 
 
 def test_settings_store_logs_which_panel_shows_the_bars(
@@ -196,6 +227,7 @@ def test_handle_request_reports_and_changes_settings() -> None:
         "enabled": True,
         "bars": ("battery", "cpu", "ram"),
         "swap_panels": False,
+        "cpu_alert_celsius": 120,
     }
     assert (
         handle_request(store, {"command": "set", "brightness_percent": 65})["brightness_percent"]
@@ -205,6 +237,8 @@ def test_handle_request_reports_and_changes_settings() -> None:
     changed = handle_request(store, {"command": "set", "bars": ["swap", "cpu", "gpu"]})
     assert changed["bars"] == ("swap", "cpu", "gpu")
     assert handle_request(store, {"command": "set", "swap_panels": True})["swap_panels"] is True
+    changed = handle_request(store, {"command": "set", "cpu_alert_celsius": 95})
+    assert changed["cpu_alert_celsius"] == 95
 
 
 @pytest.mark.parametrize(
@@ -219,6 +253,8 @@ def test_handle_request_reports_and_changes_settings() -> None:
         ({"command": "set", "bars": ["cpu", "ram", "fan"]}, "bars"),
         ({"command": "set", "swap_panels": "yes"}, "swap_panels"),
         ({"command": "set", "swap_panels": 1}, "swap_panels"),
+        ({"command": "set", "cpu_alert_celsius": 20}, "cpu_alert_celsius"),
+        ({"command": "set", "cpu_alert_celsius": "hot"}, "cpu_alert_celsius"),
     ],
 )
 def test_handle_request_rejects_bad_requests(request_body: object, message: str) -> None:
@@ -242,8 +278,9 @@ def test_client_and_server_round_trip(
     assert client.set(enabled=False) == DisplaySettings(80, enabled=False)
     assert client.set(bars=("disk", "gpu", "battery")).bars == ("disk", "gpu", "battery")
     assert client.set(swap_panels=True).swap_panels is True
+    assert client.set(cpu_alert_celsius=88).cpu_alert_celsius == 88
     assert store.current() == DisplaySettings(
-        80, enabled=False, bars=("disk", "gpu", "battery"), swap_panels=True
+        80, enabled=False, bars=("disk", "gpu", "battery"), swap_panels=True, cpu_alert_celsius=88
     )
 
 
