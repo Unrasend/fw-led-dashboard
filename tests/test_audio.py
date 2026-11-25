@@ -19,7 +19,9 @@ from framework_led_dashboard.audio import (
     MicrophoneSpectrum,
     RealPowerSpectrum,
     SpectrumAnalyzer,
+    capture_command,
     parec_command,
+    pw_record_command,
 )
 from framework_led_dashboard.equalizer import draw_equalizer, equalizer_bar_heights
 from framework_led_dashboard.frame import Frame
@@ -205,6 +207,34 @@ def test_equalizer_mirroring_swaps_outer_columns() -> None:
 
     assert plain.snapshot()[33][0] == 128 and plain.snapshot()[33][8] == 0
     assert mirrored.snapshot()[33][8] == 128 and mirrored.snapshot()[33][0] == 0
+
+
+def test_pw_record_streams_the_same_raw_pcm_to_stdout() -> None:
+    command = pw_record_command(device=None, sample_rate=SAMPLE_RATE)
+
+    assert command[0] == "pw-record"
+    assert {"--raw", "--format=s16", f"--rate={SAMPLE_RATE}", "--channels=1"} <= set(command)
+    assert command[-1] == "-"
+    assert pw_record_command(device="mic", sample_rate=SAMPLE_RATE)[-2:] == ("--target=mic", "-")
+
+
+@pytest.mark.parametrize(
+    ("installed", "tool"),
+    [({"parec", "pw-record"}, "parec"), ({"pw-record"}, "pw-record"), ({"parec"}, "parec")],
+)
+def test_capture_prefers_parec_and_falls_back_to_pw_record(installed: set[str], tool: str) -> None:
+    command = capture_command(
+        device=None,
+        sample_rate=SAMPLE_RATE,
+        which=lambda name: f"/usr/bin/{name}" if name in installed else None,
+    )
+
+    assert command[0] == tool
+
+
+def test_capture_without_either_tool_fails_like_a_missing_program() -> None:
+    with pytest.raises(FileNotFoundError, match="parec nor pw-record"):
+        capture_command(device=None, sample_rate=SAMPLE_RATE, which=lambda _name: None)
 
 
 def test_parec_command_requests_mono_sixteen_bit_pcm_at_analyzer_rate() -> None:

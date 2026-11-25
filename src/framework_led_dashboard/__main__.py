@@ -14,19 +14,20 @@ from .device_discovery import MatrixDevice, list_system_matrix_devices
 
 PanelLister = Callable[[], Sequence[MatrixDevice]]
 DashboardRunner = Callable[[DashboardConfig], int]
-TrayRunner = Callable[[], int]
+GuiRunner = Callable[[str], int]
 
 
-def _run_tray() -> int:
+def _run_gui(mode: str) -> int:
     try:
-        from .tray import run_tray
+        from .tray import run_gui
     except (ImportError, ValueError) as error:
         print(
-            f"the tray needs GTK 3 and PyGObject (pacman -S gtk3 python-gobject): {error}",
+            f"the tray and the settings window need GTK 3 and PyGObject ({error}); "
+            "running install.sh again offers to install them",
             file=sys.stderr,
         )
         return 2
-    return run_tray()
+    return run_gui(mode)
 
 
 def main(
@@ -34,7 +35,7 @@ def main(
     *,
     panel_lister: PanelLister = list_system_matrix_devices,
     dashboard_runner: DashboardRunner = run_dashboard,
-    tray_runner: TrayRunner = _run_tray,
+    gui_runner: GuiRunner = _run_gui,
 ) -> int:
     parser = argparse.ArgumentParser(prog="framework-led-dashboard")
     action = parser.add_mutually_exclusive_group(required=True)
@@ -56,7 +57,12 @@ def main(
     action.add_argument(
         "--tray",
         action="store_true",
-        help="show a tray icon with an on/off switch and a brightness slider",
+        help="show the tray icon (the one the desktop supports)",
+    )
+    action.add_argument(
+        "--settings",
+        action="store_true",
+        help="open the settings window (in the running tray, if there is one)",
     )
     action.add_argument(
         "--init-config",
@@ -69,8 +75,8 @@ def main(
     if arguments.init_config is not None:
         return _init_config(*map(Path, arguments.init_config), panel_lister=panel_lister)
 
-    if arguments.tray:
-        return tray_runner()
+    if arguments.tray or arguments.settings:
+        return gui_runner("tray" if arguments.tray else "settings")
 
     if arguments.run is not None:
         try:

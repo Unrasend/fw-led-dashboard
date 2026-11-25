@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from .config import PanelsConfig
+from .serial_port import sysfs_ports
 
 FRAMEWORK_VID = 0x32AC
 LED_MATRIX_PID = 0x0020
@@ -107,9 +108,7 @@ def _find_unique(devices: Iterable[MatrixDevice], identity: str) -> MatrixDevice
 
 
 def _system_ports() -> Iterable[PortInfo]:
-    from serial.tools import list_ports
-
-    return list_ports.comports()
+    return sysfs_ports()
 
 
 def _normalize(value: str | None) -> str | None:

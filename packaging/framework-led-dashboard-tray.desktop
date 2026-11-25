@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=LED Matrix tray
-Comment=On/off, brightness and bar sources for the Framework LED Matrix dashboard
+Comment=Tray icon for the Framework LED Matrix dashboard
 Exec=@BIN@ --tray
-Icon=video-display
+Icon=framework-led-dashboard
 Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true

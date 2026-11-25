@@ -7,7 +7,7 @@ After=pipewire.service pipewire-pulse.service pipewire-pulse.socket
 
 [Service]
 Type=exec
-ExecStart=%h/.local/share/framework-led-dashboard/venv/bin/framework-led-dashboard --run %h/.config/framework-led-dashboard/config.toml
+ExecStart=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard --run %h/.config/framework-led-dashboard/config.toml
 Environment=PYTHONUNBUFFERED=1
 SyslogIdentifier=framework-led-dashboard
 # Panels, microphone and weather recover inside the daemon; restart only if the process dies,

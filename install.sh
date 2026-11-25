@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # Install, update or remove the Framework LED Matrix dashboard for the current user.
 #
-#   ./install.sh              install or update from this checkout (safe to re-run)
-#   ./install.sh --uninstall  stop and remove the service, tray entry and venv; keep the config
+#   ./install.sh               install or update from this checkout (safe to re-run)
+#   ./install.sh --yes         ...and install missing system packages without asking
+#   ./install.sh --no-packages ...and never touch system packages
+#   ./install.sh --uninstall   remove the service, tray, menu entry and program; keep settings
 #
 # Without a checkout - piped from the web - it first downloads and unpacks release $VERSION:
 #   wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash
 #   wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash -s -- --uninstall
 #
+# The dashboard itself needs only Python 3.11+. For the rest it asks once, then installs with
+# your package manager (pacman, apt, dnf, zypper): PyGObject and GTK 3 for the tray and the
+# settings window, parec or pw-record for the equalizer, and on GNOME the AppIndicator
+# extension that gives it a tray.
+#
 # Installs:
-#   ~/.local/share/framework-led-dashboard/venv   venv reusing system pyserial/PyGObject/pycairo
+#   ~/.local/share/framework-led-dashboard/lib    the program (bin/ starts it with python3)
 #   ~/.local/share/framework-led-dashboard/src    the unpacked release (piped installs only)
 #   ~/.config/framework-led-dashboard/config.toml created once, with both panels detected
 #   ~/.config/systemd/user/framework-led-dashboard.service   enabled and (re)started
 #   ~/.config/autostart/framework-led-dashboard-tray.desktop  tray icon at login
+#   ~/.local/share/applications, ~/.local/share/icons         "LED Matrix Dashboard" settings
 # An older inputmodule-rs visualizer service (framework-matrix.service), if present, is
 # disabled - never deleted - because only one program can own the panels.
 set -euo pipefail
@@ -23,17 +31,25 @@ REPOSITORY_URL=https://github.com/Unrasend/fw-led-dashboard
 ARCHIVE_URL=${LED_DASHBOARD_ARCHIVE_URL:-$REPOSITORY_URL/releases/download/v$VERSION/framework-led-dashboard-$VERSION.tar.gz}
 PIPE_COMMAND="wget -qO- $REPOSITORY_URL/releases/latest/download/install.sh | bash"
 
+APP_ID=io.github.unrasend.FwLedDashboard
 DATA_DIR="$HOME/.local/share/framework-led-dashboard"
 CONFIG_DIR="$HOME/.config/framework-led-dashboard"
 STATE_DIR="$HOME/.local/state/framework-led-dashboard"
 UNIT_DIR="$HOME/.config/systemd/user"
 AUTOSTART_FILE="$HOME/.config/autostart/framework-led-dashboard-tray.desktop"
-VENV="$DATA_DIR/venv"
+MENU_FILE="$HOME/.local/share/applications/$APP_ID.desktop"
+ICON_FILE="$HOME/.local/share/icons/hicolor/scalable/apps/framework-led-dashboard.svg"
+LIB_DIR="$DATA_DIR/lib"
+BIN_DIR="$DATA_DIR/bin"
 SRC_DIR="$DATA_DIR/src"
-BIN="$VENV/bin/framework-led-dashboard"
+OLD_VENV="$DATA_DIR/venv"  # versions before 1.3 installed into a venv
+BIN="$BIN_DIR/framework-led-dashboard"
 SERVICE=framework-led-dashboard.service
 OLD_SERVICE=framework-matrix.service
+GNOME_EXTENSION=appindicatorsupport@rgcjonas.gmail.com
 PYTHON=${PYTHON:-python3}
+ASSUME_YES=0
+SKIP_PACKAGES=0
 
 # Empty when the script is piped into bash: there is no checkout to install from.
 SCRIPT_PATH=${BASH_SOURCE[0]:-}
@@ -43,14 +59,18 @@ if [[ -n "$SCRIPT_PATH" && -f "$(dirname "$SCRIPT_PATH")/packaging/$SERVICE" ]];
 fi
 
 step() { printf '\n==> %s\n' "$*"; }
+note() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 fail() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<EOF
 Install, update or remove the Framework LED Matrix dashboard for the current user.
 
-  ./install.sh              install or update from this checkout (safe to re-run)
-  ./install.sh --uninstall  stop and remove the service, tray entry and venv; keep the config
+  ./install.sh               install or update from this checkout (safe to re-run)
+  ./install.sh --yes         ...and install missing system packages without asking
+  ./install.sh --no-packages ...and never touch system packages
+  ./install.sh --uninstall   remove the service, tray, menu entry and program; keep settings
 
 Without a checkout:
   $PIPE_COMMAND
@@ -58,17 +78,158 @@ Without a checkout:
 EOF
 }
 
-packages_hint() {
-    cat >&2 <<'EOF'
-Install the system packages first, e.g.:
-  Arch / Manjaro:  sudo pacman -S python python-pyserial python-gobject python-cairo gtk3 libpulse
-  Debian / Ubuntu: sudo apt install python3 python3-venv python3-serial python3-gi python3-gi-cairo gir1.2-gtk-3.0 pulseaudio-utils
-  Fedora:          sudo dnf install python3 python3-pyserial python3-gobject python3-cairo gtk3 pulseaudio-utils
-EOF
+# --- system packages ------------------------------------------------------------------------
+
+package_manager() {
+    if [[ -e /run/ostree-booted ]]; then
+        echo rpm-ostree  # Silverblue, Kinoite, Bazzite: layering needs a reboot, so only advise
+    elif command -v pacman >/dev/null; then
+        echo pacman
+    elif command -v apt-get >/dev/null; then
+        echo apt
+    elif command -v dnf >/dev/null; then
+        echo dnf
+    elif command -v zypper >/dev/null; then
+        echo zypper
+    else
+        echo unknown
+    fi
 }
 
+# packages_for MANAGER NEED - the distribution's package names for gtk, audio or gnome-tray.
+packages_for() {
+    case "$1:$2" in
+        pacman:gtk) echo "python-gobject gtk3" ;;
+        apt:gtk) echo "python3-gi gir1.2-gtk-3.0" ;;
+        dnf:gtk | rpm-ostree:gtk) echo "python3-gobject gtk3" ;;
+        zypper:gtk) echo "python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0" ;;
+        pacman:audio) echo "libpulse" ;;
+        apt:audio | dnf:audio | rpm-ostree:audio | zypper:audio) echo "pulseaudio-utils" ;;
+        *:gnome-tray) echo "gnome-shell-extension-appindicator" ;;
+        *) echo "" ;;
+    esac
+}
+
+on_gnome() {
+    [[ ":${XDG_CURRENT_DESKTOP:-}:" == *:GNOME:* ]]
+}
+
+has_tray_host() {
+    busctl --user --no-pager status org.kde.StatusNotifierWatcher >/dev/null 2>&1
+}
+
+# missing_needs - which of gtk, audio, gnome-tray this system lacks, one per line.
+missing_needs() {
+    if ! "$PYTHON" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
+        >/dev/null 2>&1; then
+        echo gtk
+    fi
+    if ! command -v parec >/dev/null && ! command -v pw-record >/dev/null; then
+        echo audio
+    fi
+    if on_gnome && ! has_tray_host \
+        && ! gnome-extensions info "$GNOME_EXTENSION" >/dev/null 2>&1; then
+        echo gnome-tray
+    fi
+}
+
+ask_yes() {
+    [[ "$ASSUME_YES" == 1 ]] && return 0
+    # Piped installs read the script from stdin, so ask on the terminal itself.
+    { : </dev/tty; } 2>/dev/null || return 1
+    local answer=""
+    printf '%s [Y/n] ' "$1" >/dev/tty
+    read -r answer </dev/tty || return 1
+    [[ -z "$answer" || "$answer" == [Yy]* ]]
+}
+
+install_command() {
+    local manager=$1
+    shift
+    case "$manager" in
+        pacman) echo "sudo pacman -S --needed $*" ;;
+        apt) echo "sudo apt-get install $*" ;;
+        dnf) echo "sudo dnf install $*" ;;
+        zypper) echo "sudo zypper install $*" ;;
+        rpm-ostree) echo "rpm-ostree install $* (then reboot)" ;;
+        *) echo "install with your package manager: $*" ;;
+    esac
+}
+
+run_install() {
+    local manager=$1 input=/dev/null
+    shift
+    # sudo asks for the password on the terminal; piped installs have no other stdin.
+    { : </dev/tty; } 2>/dev/null && input=/dev/tty
+    case "$manager" in
+        pacman) sudo pacman -S --needed --noconfirm "$@" ;;
+        apt) sudo apt-get install -y "$@" ;;
+        dnf) sudo dnf install -y "$@" ;;
+        zypper) sudo zypper --non-interactive install "$@" ;;
+        *) return 1 ;;
+    esac <"$input"
+}
+
+enable_gnome_tray() {
+    command -v gnome-extensions >/dev/null || return 0
+    if gnome-extensions enable "$GNOME_EXTENSION" 2>/dev/null; then
+        note "enabled the AppIndicator extension"
+        return 0
+    fi
+    # A freshly installed extension is only seen after logging in again: enable it for then.
+    local enabled
+    enabled=$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null || echo "@as []")
+    if [[ "$enabled" != *"$GNOME_EXTENSION"* ]]; then
+        enabled=${enabled/@as /}
+        enabled=${enabled%]}
+        [[ "$enabled" == "[" ]] && enabled="['$GNOME_EXTENSION']" || enabled="$enabled, '$GNOME_EXTENSION']"
+        gsettings set org.gnome.shell enabled-extensions "$enabled" 2>/dev/null || true
+    fi
+    note "log out and back in once to see the tray icon (GNOME loads new extensions at login)"
+}
+
+install_system_packages() {
+    local needs manager packages=() need
+    mapfile -t needs < <(missing_needs)
+    [[ ${#needs[@]} -eq 0 ]] && return 0
+    manager=$(package_manager)
+    for need in "${needs[@]}"; do
+        read -ra names <<<"$(packages_for "$manager" "$need")"
+        packages+=("${names[@]}")
+    done
+    step "System packages"
+    for need in "${needs[@]}"; do
+        case "$need" in
+            gtk) note "- PyGObject and GTK 3: the tray icon and the settings window" ;;
+            audio) note "- parec (PulseAudio tools): the equalizer" ;;
+            gnome-tray) note "- GNOME's AppIndicator extension: GNOME has no tray without it" ;;
+        esac
+    done
+    local command
+    command=$(install_command "$manager" "${packages[@]}")
+    if [[ "$SKIP_PACKAGES" == 1 || "$manager" == rpm-ostree || "$manager" == unknown ]]; then
+        warn "not installed; to add them: $command"
+        return 0
+    fi
+    if ! ask_yes "Install them now ($command)?"; then
+        warn "skipped; the dashboard runs without them. Later: $command"
+        return 0
+    fi
+    if ! run_install "$manager" "${packages[@]}"; then
+        warn "the package manager failed; the dashboard runs without them. Later: $command"
+        return 0
+    fi
+    [[ " ${needs[*]} " == *" gnome-tray "* ]] && enable_gnome_tray
+    return 0
+}
+
+# --- the program ----------------------------------------------------------------------------
+
 stop_tray() {
-    pkill -f "$BIN --tray" 2>/dev/null || true
+    # Whole command lines only, so no other process that mentions the tray is hit: the
+    # launcher execs `python3 -P -m framework_led_dashboard --tray`; before 1.3 a venv script.
+    pkill -f '^/[^ ]*python[^ ]* -P -m framework_led_dashboard --tray$' 2>/dev/null || true
+    pkill -f "^[^ ]*python[^ ]* $OLD_VENV/bin/framework-led-dashboard --tray\$" 2>/dev/null || true
 }
 
 uninstall() {
@@ -76,11 +237,11 @@ uninstall() {
     systemctl --user disable --now "$SERVICE" 2>/dev/null || true
     rm -f "$UNIT_DIR/$SERVICE"
     systemctl --user daemon-reload
-    step "Removing the tray"
+    step "Removing the tray and the menu entry"
     stop_tray
-    rm -f "$AUTOSTART_FILE"
+    rm -f "$AUTOSTART_FILE" "$MENU_FILE" "$ICON_FILE"
     step "Removing $DATA_DIR"
-    rm -rf "$VENV" "$SRC_DIR"
+    rm -rf "$LIB_DIR" "$BIN_DIR" "$SRC_DIR" "$OLD_VENV"
     rmdir "$DATA_DIR" 2>/dev/null || true
     printf '\nKept your settings: %s and %s (delete them to remove everything).\n' \
         "$CONFIG_DIR" "$STATE_DIR"
@@ -124,36 +285,61 @@ fetch_release() {
     printf 'unpacked into %s\n' "$SRC_DIR"
 }
 
+install_program() {
+    local python_path
+    python_path=$(command -v "$PYTHON")
+    step "Installing the program into $DATA_DIR"
+    rm -rf "$LIB_DIR.new"
+    mkdir -p "$LIB_DIR.new" "$BIN_DIR"
+    cp -R "$PROJECT_DIR/src/framework_led_dashboard" "$LIB_DIR.new/"
+    find "$LIB_DIR.new" -name __pycache__ -type d -prune -exec rm -rf {} +
+    rm -rf "$LIB_DIR"
+    mv "$LIB_DIR.new" "$LIB_DIR"
+    cat >"$BIN.new" <<EOF
+#!/bin/sh
+# Starts the Framework LED Matrix dashboard that install.sh put in $LIB_DIR.
+PYTHONPATH="$LIB_DIR\${PYTHONPATH:+:\$PYTHONPATH}" exec "$python_path" -P -m framework_led_dashboard "\$@"
+EOF
+    chmod 755 "$BIN.new"
+    mv "$BIN.new" "$BIN"
+    "$BIN" --help >/dev/null || fail "the installed program does not start"
+    rm -rf "$OLD_VENV"
+}
+
+install_desktop_entries() {
+    step "Tray icon at login and the LED Matrix Dashboard menu entry"
+    install -Dm644 "$PROJECT_DIR/packaging/framework-led-dashboard.svg" "$ICON_FILE"
+    mkdir -p "$(dirname "$AUTOSTART_FILE")" "$(dirname "$MENU_FILE")"
+    sed "s|@BIN@|$BIN|" "$PROJECT_DIR/packaging/framework-led-dashboard-tray.desktop" \
+        >"$AUTOSTART_FILE"
+    sed "s|@BIN@|$BIN|" "$PROJECT_DIR/packaging/$APP_ID.desktop" >"$MENU_FILE"
+    command -v update-desktop-database >/dev/null \
+        && update-desktop-database "$(dirname "$MENU_FILE")" 2>/dev/null || true
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+        stop_tray
+        setsid -f "$BIN" --tray >/dev/null 2>&1
+        note "tray (re)started"
+    else
+        note "no graphical session in this shell: the tray starts at the next login"
+    fi
+}
+
 install_dashboard() {
     step "Checking requirements"
     command -v systemctl >/dev/null || fail "systemd is required"
-    command -v "$PYTHON" >/dev/null || { packages_hint; fail "$PYTHON not found"; }
+    command -v "$PYTHON" >/dev/null || fail "$PYTHON not found; install Python 3.11 or newer"
     "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
-        || fail "$PYTHON is older than 3.11"
-    "$PYTHON" -c 'import venv, serial' 2>/dev/null \
-        || { packages_hint; fail "python venv or pyserial is missing"; }
-    command -v parec >/dev/null \
-        || printf 'warning: parec not found - the equalizer stays dark (install libpulse / pulseaudio-utils)\n' >&2
+        || fail "$PYTHON is older than 3.11; this distribution is too old for the dashboard"
+    install_system_packages
 
-    step "Installing the package into $VENV"
-    if [[ ! -x "$VENV/bin/python" ]]; then
-        "$PYTHON" -m venv --system-site-packages "$VENV"
-    fi
-    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check \
-        --no-build-isolation --no-deps --upgrade "$PROJECT_DIR"
-    "$VENV/bin/python" -c 'import serial, framework_led_dashboard' \
-        || fail "the installed package cannot be imported"
-    if ! "$VENV/bin/python" -c 'import cairo, gi; gi.require_version("Gtk", "3.0")' 2>/dev/null; then
-        printf 'warning: GTK 3 / PyGObject / pycairo missing - the tray icon will not start\n' >&2
-        packages_hint
-    fi
+    install_program
 
     step "Configuration in $CONFIG_DIR"
     if [[ -f "$CONFIG_DIR/config.toml" ]]; then
-        printf 'keeping the existing config.toml\n'
+        note "keeping the existing config.toml"
     elif [[ -f "$PROJECT_DIR/config.toml" ]]; then
         install -Dm644 "$PROJECT_DIR/config.toml" "$CONFIG_DIR/config.toml"
-        printf 'copied %s\n' "$PROJECT_DIR/config.toml"
+        note "copied $PROJECT_DIR/config.toml"
     else
         "$BIN" --init-config "$PROJECT_DIR/config.example.toml" "$CONFIG_DIR/config.toml" \
             || fail "could not detect both panels; see '$BIN --list-panels'"
@@ -163,7 +349,7 @@ install_dashboard() {
 
     step "Checking that no hand-started dashboard holds the panels"
     if ! systemctl --user --quiet is-active "$SERVICE" \
-        && "$VENV/bin/python" -c 'from framework_led_dashboard.control import ControlClient; ControlClient().status()' 2>/dev/null; then
+        && PYTHONPATH="$LIB_DIR" "$PYTHON" -c 'from framework_led_dashboard.control import ControlClient; ControlClient().status()' 2>/dev/null; then
         fail "a dashboard started by hand is running; stop it (Ctrl+C or kill) and re-run"
     fi
 
@@ -178,16 +364,7 @@ install_dashboard() {
     systemctl --user enable "$SERVICE"
     systemctl --user restart "$SERVICE"
 
-    step "Tray icon at login"
-    mkdir -p "$(dirname "$AUTOSTART_FILE")"
-    sed "s|@BIN@|$BIN|" "$PROJECT_DIR/packaging/framework-led-dashboard-tray.desktop" > "$AUTOSTART_FILE"
-    if [[ -n "${DISPLAY:-}" ]]; then
-        stop_tray
-        setsid -f "$BIN" --tray >/dev/null 2>&1
-        printf 'tray (re)started\n'
-    else
-        printf 'no X display in this shell: the tray starts at the next login\n'
-    fi
+    install_desktop_entries
 
     step "Status"
     sleep 2
@@ -198,7 +375,8 @@ install_dashboard() {
     fi
     cat <<EOF
 
-Done. Logs:     journalctl --user -u $SERVICE -f
+Done. Settings: "LED Matrix Dashboard" in the application menu, or the tray icon
+      Logs:     journalctl --user -u $SERVICE -f
       Config:   $CONFIG_DIR/config.toml (then: systemctl --user restart $SERVICE)
       Update:   $update
       Remove:   $PROJECT_DIR/install.sh --uninstall
@@ -206,19 +384,27 @@ EOF
 }
 
 main() {
-    case "${1:-}" in
-        "") ;;
-        --uninstall) uninstall; return ;;
-        -h | --help) usage; return ;;
-        *) fail "unknown option: $1 (use --uninstall or --help)" ;;
-    esac
+    local arguments=("$@")
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --uninstall) uninstall; return ;;
+            -h | --help) usage; return ;;
+            -y | --yes) ASSUME_YES=1 ;;
+            --no-packages) SKIP_PACKAGES=1 ;;
+            *) fail "unknown option: $1 (see --help)" ;;
+        esac
+        shift
+    done
     if [[ -z "$PROJECT_DIR" ]]; then
         fetch_release
         # Run the unpacked copy; stdin is still the rest of the piped script.
-        exec bash "$SRC_DIR/install.sh" </dev/null
+        exec bash "$SRC_DIR/install.sh" "${arguments[@]}" </dev/null
     fi
     install_dashboard
 }
 
-# The only top-level command: a download cut short runs nothing.
-main "$@"
+# The only top-level command, so a download cut short runs nothing; tests source the
+# functions without running it.
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

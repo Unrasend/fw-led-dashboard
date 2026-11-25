@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=LED Matrix Dashboard
+GenericName=LED Matrix settings
+Comment=On/off, brightness, panel swap, bar sources and the CPU alert of the Framework LED Matrix dashboard
+Exec=@BIN@ --settings
+Icon=framework-led-dashboard
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=Framework;LED;Matrix;dashboard;panel;
+StartupNotify=true
+StartupWMClass=io.github.unrasend.FwLedDashboard

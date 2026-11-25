@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import sys
-from types import SimpleNamespace
-
 import pytest
 
+from framework_led_dashboard import matrix_transport
 from framework_led_dashboard.matrix_transport import (
     MatrixTransport,
     ReconnectPending,
@@ -133,11 +131,11 @@ def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
     connection = FakeSerial()
     opened_with: dict[str, object] = {}
 
-    def open_serial(path: str, baud_rate: int, **options: object) -> FakeSerial:
-        opened_with.update(path=path, baud_rate=baud_rate, **options)
+    def open_serial(path: str, **options: object) -> FakeSerial:
+        opened_with.update(path=path, **options)
         return connection
 
-    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(Serial=open_serial))
+    monkeypatch.setattr(matrix_transport, "SerialPort", open_serial)
     transport = MatrixTransport(
         identity="stable-left",
         path_resolver=lambda identity: f"/dev/by-id/{identity}",
@@ -146,8 +144,9 @@ def test_default_serial_timeout_tolerates_observed_framework_usb_stalls(
     transport.write_frame([[0] * 9 for _ in range(34)])
 
     # A waking panel ignores USB during its fade-in: 255 / 5 steps x 100 ms = 5.1 s.
-    assert opened_with["write_timeout"] >= 5.2
-    assert opened_with["timeout"] >= 5.2
+    assert opened_with["path"] == "/dev/by-id/stable-left"
+    assert opened_with["write_timeout_seconds"] >= 5.2
+    assert opened_with["read_timeout_seconds"] >= 5.2
 
 
 def test_write_error_closes_connection_then_resolves_same_identity_after_backoff() -> None:

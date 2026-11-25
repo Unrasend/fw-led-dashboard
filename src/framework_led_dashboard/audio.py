@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cmath
 import math
+import shutil
 import subprocess
 import sys
 import threading
@@ -217,9 +218,36 @@ def parec_command(*, device: str | None, sample_rate: int) -> tuple[str, ...]:
     return command if device is None else (*command, f"--device={device}")
 
 
-def _spawn_parec(device: str | None, sample_rate: int) -> CaptureProcess:
+def pw_record_command(*, device: str | None, sample_rate: int) -> tuple[str, ...]:
+    """PipeWire's own recorder: the same raw stream, for systems without parec."""
+    command = (
+        "pw-record",
+        "--raw",
+        "--format=s16",  # native byte order, little-endian on every Framework laptop
+        f"--rate={sample_rate}",
+        "--channels=1",
+        "--latency=40ms",
+    )
+    return (*command, "-") if device is None else (*command, f"--target={device}", "-")
+
+
+def capture_command(
+    *,
+    device: str | None,
+    sample_rate: int,
+    which: Callable[[str], str | None] = shutil.which,
+) -> tuple[str, ...]:
+    """parec where it exists (PulseAudio, or PipeWire with its Pulse tools), else pw-record."""
+    if which("parec"):
+        return parec_command(device=device, sample_rate=sample_rate)
+    if which("pw-record"):
+        return pw_record_command(device=device, sample_rate=sample_rate)
+    raise FileNotFoundError("neither parec nor pw-record is installed")
+
+
+def _spawn_capture(device: str | None, sample_rate: int) -> CaptureProcess:
     return subprocess.Popen(
-        parec_command(device=device, sample_rate=sample_rate),
+        capture_command(device=device, sample_rate=sample_rate),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -240,7 +268,7 @@ class MicrophoneSpectrum:
         restart_max_seconds: float = 10.0,
     ) -> None:
         self._analyzer = analyzer or SpectrumAnalyzer()
-        self._process_factory = process_factory or (lambda: _spawn_parec(device, SAMPLE_RATE))
+        self._process_factory = process_factory or (lambda: _spawn_capture(device, SAMPLE_RATE))
         self._clock = clock
         self._sleeper = sleeper
         self._stale_after_seconds = stale_after_seconds

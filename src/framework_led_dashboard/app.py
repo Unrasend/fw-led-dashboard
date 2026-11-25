@@ -379,7 +379,7 @@ class MicrophoneWatch:
     """Capture from the microphone only while the panels are on, and log when it comes and goes.
 
     Releasing it while the panels are off saves the spectrum analysis and frees the microphone
-    (desktops show it as in use while parec runs). A capture that just (re)started gets
+    (desktops show it as in use while parec or pw-record runs). A capture that just (re)started gets
     `startup_grace_seconds` before it counts as unavailable.
     """
 

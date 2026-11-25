@@ -9,6 +9,7 @@ from .alerts import AlertState
 from .system_metrics import SystemMetrics
 
 BAR_COUNT = 3
+BAR_SLOT_NAMES = ("Bar 1 (left)", "Bar 2 (middle)", "Bar 3 (right)")
 
 
 def _never(_alerts: AlertState) -> bool:

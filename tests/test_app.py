@@ -667,15 +667,16 @@ def test_run_dashboard_refuses_to_start_next_to_a_running_dashboard(
     assert "already listening" in caplog.text
 
 
-def test_cli_tray_starts_the_tray_without_a_config() -> None:
-    started: list[bool] = []
+def test_cli_tray_and_settings_start_the_gui_without_a_config() -> None:
+    started: list[str] = []
 
-    def tray_runner() -> int:
-        started.append(True)
+    def gui_runner(mode: str) -> int:
+        started.append(mode)
         return 0
 
-    assert main(["--tray"], tray_runner=tray_runner) == 0
-    assert started == [True]
+    assert main(["--tray"], gui_runner=gui_runner) == 0
+    assert main(["--settings"], gui_runner=gui_runner) == 0
+    assert started == ["tray", "settings"]
 
 
 def test_cli_run_hands_loaded_config_to_the_dashboard(tmp_path: Path) -> None:

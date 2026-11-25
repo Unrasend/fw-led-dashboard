@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: System :: Monitoring",
 ]
-dependencies = ["pyserial>=3.5,<4"]
+dependencies = []  # the daemon needs only the standard library
 
 [project.urls]
 Homepage = "https://github.com/Unrasend/fw-led-dashboard"
@@ -28,7 +28,7 @@ Issues = "https://github.com/Unrasend/fw-led-dashboard/issues"
 framework-led-dashboard = "framework_led_dashboard.__main__:main"
 
 [project.optional-dependencies]
-tray = ["PyGObject>=3.42", "pycairo>=1.20"]
+tray = ["PyGObject>=3.42"]  # tray icon and settings window; distributions ship it
 
 [tool.setuptools.packages.find]
 where = ["src"]

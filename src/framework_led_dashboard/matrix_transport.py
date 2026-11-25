@@ -6,6 +6,7 @@ from typing import Protocol, TypeVar
 
 from .device_discovery import DeviceDiscoveryError
 from .frame import FRAME_HEIGHT, FRAME_WIDTH
+from .serial_port import SerialPort
 
 _FRAMEWORK_MAGIC = bytes([0x32, 0xAC])
 _BRIGHTNESS = 0x00
@@ -17,7 +18,6 @@ _RESPONSE_SIZE = 32
 # The firmware fades a waking panel in with `old_brightness - 5` on a u8. A stored level below 5
 # wraps to ~250, so the panel flares to full brightness and then drops back: never go below 5.
 MIN_BRIGHTNESS_LEVEL = 5
-_BAUD_RATE = 115_200
 # A waking panel ignores USB during its fade-in: up to 255 / 5 steps x 100 ms = 5.1 s.
 # Both timeouts cover it, so a wake-up (e.g. after suspend) stalls a frame instead of failing it.
 _SERIAL_READ_TIMEOUT_SECONDS = 6.0
@@ -232,11 +232,8 @@ def _write_exact(connection: SerialConnection, command: bytes) -> None:
 
 
 def _open_serial(path: str) -> SerialConnection:
-    import serial
-
-    return serial.Serial(
+    return SerialPort(
         path,
-        _BAUD_RATE,
-        timeout=_SERIAL_READ_TIMEOUT_SECONDS,
-        write_timeout=_SERIAL_WRITE_TIMEOUT_SECONDS,
+        read_timeout_seconds=_SERIAL_READ_TIMEOUT_SECONDS,
+        write_timeout_seconds=_SERIAL_WRITE_TIMEOUT_SECONDS,
     )

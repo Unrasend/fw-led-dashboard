@@ -22,9 +22,11 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 - **Alerts:** only the critical value blinks, at 1 Hz, with hysteresis — battery ≤ 10 %,
   less than 5 % RAM free for 10 s, CPU at 120 °C (set your own in the tray). CPU-usage and
   outside-temperature limits are optional.
-- **Tray icon (GTK 3):** on/off switch, brightness slider, *Swap panels* switch, a submenu
-  per bar and the CPU alert temperature; every data source has a tooltip saying where its
-  numbers come from. Choices survive restarts.
+- **Tray icon and settings window (GTK 3):** on/off, brightness, *Swap panels*, a source per
+  bar and the CPU alert temperature. The icon works in KDE Plasma (X11 and Wayland), GNOME
+  (with the AppIndicator extension, which Ubuntu ships and the installer can add), XFCE,
+  Cinnamon, MATE and others; the *LED Matrix Dashboard* window from the application menu works
+  everywhere, tray or not. Choices survive restarts.
 - **Runs unattended:** systemd user service; recovers from suspend/resume, USB reconnects,
   PipeWire restarts and network loss (the last weather reading is shown for up to 2 h).
 - **Light:** about 6 frames per second per panel (the firmware's grayscale limit) for about
@@ -35,22 +37,27 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 ## Requirements
 
 - Framework Laptop 16 with **two** LED Matrix input modules (stock firmware).
-- Linux with a systemd user session, PipeWire or PulseAudio (`parec`) and Python ≥ 3.11.
-- For the tray: GTK 3 and an X11 panel that shows classic tray icons (XFCE, KDE Plasma, MATE,
-  Cinnamon, …). The daemon works without the tray, including on Wayland.
+- Linux with a systemd user session and Python ≥ 3.11 — Ubuntu 24.04, Fedora 39, Debian 12,
+  Arch and newer. The dashboard itself uses nothing but Python's standard library.
+- The installer checks for the rest and offers to install it with your package manager
+  (pacman, apt, dnf or zypper), asking once:
 
-| Distribution | Packages |
-|---|---|
-| Arch / Manjaro | `python python-pyserial python-gobject python-cairo gtk3 libpulse` |
-| Debian / Ubuntu | `python3 python3-venv python3-serial python3-gi python3-gi-cairo gir1.2-gtk-3.0 pulseaudio-utils` |
-| Fedora | `python3 python3-pyserial python3-gobject python3-cairo gtk3 pulseaudio-utils` |
+| What | For | Arch | Debian / Ubuntu | Fedora |
+|---|---|---|---|---|
+| PyGObject, GTK 3 | tray icon, settings window | `python-gobject gtk3` | `python3-gi gir1.2-gtk-3.0` | `python3-gobject gtk3` |
+| `parec` (or PipeWire's `pw-record`) | equalizer | `libpulse` | `pulseaudio-utils` | `pulseaudio-utils` |
+| AppIndicator extension, GNOME only | a tray on GNOME | `gnome-shell-extension-appindicator` | (preinstalled on Ubuntu) | `gnome-shell-extension-appindicator` |
+
+Most desktops already have all of it. On Fedora Silverblue, Kinoite or Bazzite the installer
+prints the `rpm-ostree install` line instead, since layering needs a reboot.
 
 The panels are `/dev/ttyACM*` serial devices. Most desktops grant them to the logged-in user
 automatically (`uaccess`); otherwise add yourself to `uucp` (Arch) or `dialout` (Debian,
 Fedora) and log in again.
 
-Developed and tested on Manjaro with XFCE on X11. Other setups should work but have not been
-tried — reports are welcome.
+Developed and run daily on Manjaro with XFCE on X11. The StatusNotifierItem tray for KDE,
+GNOME and the rest is tested against its D-Bus protocol and XFCE's StatusNotifier host, not
+yet on KDE or GNOME themselves — reports from other desktops and distributions are welcome.
 
 ## Install
 
@@ -80,21 +87,24 @@ cd fw-led-dashboard && ./install.sh
 
 The installer:
 
-1. creates a venv in `~/.local/share/framework-led-dashboard/venv` that reuses the system
-   packages above (no Python packages are downloaded) and installs the dashboard into it;
-2. detects both panels and writes `~/.config/framework-led-dashboard/config.toml` — only if
+1. offers to install the missing system packages above (`--yes` installs them without asking,
+   `--no-packages` never touches them);
+2. copies the program to `~/.local/share/framework-led-dashboard` — no venv, no pip, no
+   downloads from PyPI;
+3. detects both panels and writes `~/.config/framework-led-dashboard/config.toml` — only if
    it does not exist yet;
-3. installs, enables and starts the `framework-led-dashboard` systemd user service;
-4. adds the tray icon to `~/.config/autostart` and starts it;
-5. disables the older `inputmodule-rs` audio visualizer service (`framework-matrix.service`) if
+4. installs, enables and starts the `framework-led-dashboard` systemd user service;
+5. starts the tray icon and adds it to `~/.config/autostart`, and adds *LED Matrix Dashboard*
+   to the application menu;
+6. disables the older `inputmodule-rs` audio visualizer service (`framework-matrix.service`) if
    you have it — only one program can own the panels; it is not deleted.
 
 **Bars on the right and weather on the left?** Turn on *Swap panels* in the tray menu; the
 panels swap at once and the choice is kept.
 
 **Update:** run the same `wget … | bash` line again (or `git pull` and `./install.sh` in a
-checkout). **Remove** — stops and removes the service, tray entry, venv and downloaded source;
-keeps your config and tray settings:
+checkout). **Remove** — stops and removes the service, the tray, the menu entry and the
+program; keeps your config and tray settings:
 
 ```bash
 wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/install.sh | bash -s -- --uninstall
@@ -104,14 +114,24 @@ or `./install.sh --uninstall` in a checkout.
 
 ## Using it
 
-**Tray icon** (amber when on, grey when off, red dot when the dashboard is not running):
-left click opens the menu — the *LED Matrix* switch, the *Brightness* slider (drag, click or
-scroll), the *Swap panels* switch (bars on the right, weather on the left), *Left panel bars*
-with one submenu per bar, and *CPU alert: 120 °C…*, which opens a box to type the temperature
-at which the CPU value starts blinking (40–150 °C). Right click offers *Quit tray*; quitting
-the tray never touches the panels. Brightness, on/off, the swap, the bar choice and the CPU
-alert are stored in
-`~/.local/state/framework-led-dashboard/display.json`.
+**Settings window** — *LED Matrix Dashboard* in the application menu, or *Settings…* in the
+tray: on/off, a brightness slider, *Swap panels* (bars on the right, weather on the left), the
+source of each bar, and *CPU alert*, the temperature at which the CPU value starts blinking
+(40–150 °C). Changes apply at once.
+
+**Tray icon** (amber when on, grey when off, red dot when the dashboard is not running). Its
+menu has the same settings, with brightness in steps; it looks a little different per desktop:
+
+- *KDE Plasma, GNOME, Cinnamon, Budgie, …* (StatusNotifierItem): right click opens the menu,
+  left click the settings window, middle click switches the LED Matrix on or off, and
+  scrolling over the icon changes the brightness.
+- *XFCE, MATE on X11*: left click opens a popup with a real switch and slider, right click
+  *Settings…* and *Quit tray*.
+- *GNOME without the AppIndicator extension* has no tray at all: use the menu entry.
+  `LED_DASHBOARD_TRAY=sni|xembed|none` overrides the guess.
+
+Quitting the tray never touches the panels. Brightness, on/off, the swap, the bar choice and
+the CPU alert are stored in `~/.local/state/framework-led-dashboard/display.json`.
 
 **Service:**
 
@@ -139,6 +159,7 @@ config and restart it.
 | `--init-config TEMPLATE PATH` | write a new config from a template with both panels filled in |
 | `--run PATH` | run the dashboard in the foreground until Ctrl+C / SIGTERM |
 | `--tray` | show the tray icon |
+| `--settings` | open the settings window (in the running tray, if there is one) |
 
 ## Configuration
 
@@ -170,15 +191,15 @@ cached location, then the city of the system time zone. Weather requests send on
 | Panels stay dark | `journalctl --user -u framework-led-dashboard`; another program (e.g. an `inputmodule-control` visualizer) may hold the serial ports |
 | `Permission denied` on `/dev/ttyACM*` | the `uaccess` / group notes under Requirements |
 | Sides swapped | *Swap panels* in the tray menu |
-| Equalizer stays dark | `parec` installed? The log says `microphone unavailable` when there is no capture |
+| Equalizer stays dark | `parec` or `pw-record` installed? The log says `microphone unavailable` when there is no capture |
 | Weather shows `--` | no network for over 2 h, or no location — set `latitude`/`longitude` |
-| No tray icon | needs GTK 3 and an X11 tray with classic icons; the daemon keeps working without it |
+| No tray icon | GNOME: enable the *AppIndicator and KStatusNotifierItem Support* extension (the installer offers it), then log in again. Elsewhere: run `install.sh` again for PyGObject/GTK 3. The *LED Matrix Dashboard* menu entry works either way |
 | Panels freeze for a few seconds after resume | expected: they reconnect on their own |
 
 ## How it works
 
 One process owns both panels: a sender thread per panel, a 1 Hz sensor loop, a weather loop,
-a `parec` capture with a small FFT for the spectrum, and a Unix socket
+a `parec` (or `pw-record`) capture with a small FFT for the spectrum, and a Unix socket
 (`$XDG_RUNTIME_DIR/framework-led-dashboard.sock`, owner-only) for the tray. Renderers are pure
 functions from state to a 9×34 grayscale frame.
 
@@ -207,7 +228,7 @@ Firmware details worth knowing if you write your own LED Matrix code:
 ## Development
 
 ```bash
-uvx --with pyserial pytest
+uvx pytest
 ```
 
 ```bash
