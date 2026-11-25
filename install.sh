@@ -18,7 +18,7 @@
 # disabled - never deleted - because only one program can own the panels.
 set -euo pipefail
 
-VERSION=1.1.1
+VERSION=1.2.0
 REPOSITORY_URL=https://github.com/Unrasend/fw-led-dashboard
 ARCHIVE_URL=${LED_DASHBOARD_ARCHIVE_URL:-$REPOSITORY_URL/releases/download/v$VERSION/framework-led-dashboard-$VERSION.tar.gz}
 PIPE_COMMAND="wget -qO- $REPOSITORY_URL/releases/latest/download/install.sh | bash"

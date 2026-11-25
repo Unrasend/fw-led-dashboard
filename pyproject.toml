@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "framework-led-dashboard"
-version = "1.1.1"
+version = "1.2.0"
 description = "System dashboard for the two LED Matrix input modules of a Framework Laptop 16"
 readme = "README.md"
 license = "MIT"
