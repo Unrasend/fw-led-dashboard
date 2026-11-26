@@ -14,6 +14,7 @@ from framework_led_dashboard.alerts import AlertPolicy, AlertState
 from framework_led_dashboard.app import (
     BLANK_FRAME,
     DISABLED_POLL_SECONDS,
+    EXIT_PORTS_CHANGED,
     FRAME_RESEND_SECONDS,
     SLEEP_REFRESH_SECONDS,
     Dashboard,
@@ -21,6 +22,7 @@ from framework_led_dashboard.app import (
     DashboardState,
     Loop,
     PanelWorker,
+    PortWatch,
     SensorSampler,
     SoundWatch,
     WeatherUpdater,
@@ -693,6 +695,8 @@ def test_run_dashboard_stops_cleanly_on_sigterm_and_restores_handlers() -> None:
     previous_handler = signal.getsignal(signal.SIGTERM)
 
     class RecordingDashboard:
+        restart_requested = False
+
         def start(self) -> None:
             events.append("start")
 
@@ -714,6 +718,50 @@ def test_run_dashboard_stops_cleanly_on_sigterm_and_restores_handlers() -> None:
     assert events == ["start", "stop"]
     assert time.monotonic() - started < 2.0
     assert signal.getsignal(signal.SIGTERM) == previous_handler
+
+
+def test_run_dashboard_exits_to_start_again_when_the_dashboard_asks() -> None:
+    events: list[str] = []
+
+    class RestartingDashboard:
+        restart_requested = False
+
+        def start(self) -> None:
+            events.append("start")
+            self.restart_requested = True  # as PortWatch does from its thread
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    assert run_dashboard(CONFIGURED, dashboard_factory=lambda _config: RestartingDashboard()) == 3
+    assert EXIT_PORTS_CHANGED == 3
+    assert events == ["start", "stop"]  # stopped as on SIGTERM: the panels are blanked
+
+
+def test_port_watch_asks_for_a_restart_when_a_port_stays_unreachable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    restarts: list[str] = []
+    seen = iter([(), ("ttyACM2",), (), ("ttyACM2",), ("ttyACM2",)])
+    watch = PortWatch(lambda: restarts.append("restart"), unreachable_ports=lambda: next(seen))
+
+    with caplog.at_level(logging.WARNING):
+        delays = [watch.step() for _ in range(4)]
+        assert restarts == []  # missing once at a time: a node the kernel is still creating
+        watch.step()
+
+    assert delays == [2.0] * 4
+    assert restarts == ["restart"]
+    assert "LED Matrix port ttyACM2 is not in this container" in caplog.text
+
+
+def test_dashboard_restart_event_is_what_it_reports() -> None:
+    restart = threading.Event()
+    dashboard = Dashboard(panels=(), background=(), sound=FakeSound(), restart=restart)
+
+    assert dashboard.restart_requested is False
+    restart.set()
+    assert dashboard.restart_requested is True
 
 
 def test_run_dashboard_refuses_to_start_next_to_a_running_dashboard(

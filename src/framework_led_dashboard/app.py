@@ -28,7 +28,7 @@ from .control import (
     default_socket_path,
     describe_layout,
 )
-from .device_discovery import resolve_device_path
+from .device_discovery import resolve_device_path, unreachable_matrix_ports
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
 from .layout import SIDES, bar_rules
 from .location import (
@@ -62,6 +62,12 @@ JOIN_TIMEOUT_SECONDS = 5.0
 DISABLED_POLL_SECONDS = 0.25
 FRAME_RESEND_SECONDS = 2.0
 SLEEP_REFRESH_SECONDS = 5.0
+PORT_WATCH_SECONDS = 2.0
+# The Docker wrapper passes the LED Matrix ports in one by one, as they are when the container
+# starts, and sets this; the daemon then exits with EXIT_PORTS_CHANGED when a module turns up
+# under a port the container lacks, and the wrapper starts it again with the ports as they are.
+RESTART_ON_NEW_PORT_ENV = "LED_DASHBOARD_RESTART_ON_NEW_PORT"
+EXIT_PORTS_CHANGED = 3
 UNKNOWN_METRICS = SystemMetrics(battery_percent=None, cpu_percent=None, ram_used_percent=None)
 NO_ALERTS = AlertState()
 
@@ -451,6 +457,37 @@ def _describe_capture(request: CaptureRequest) -> str:
     return f"{what} in stereo" if request.channels == 2 else what
 
 
+class PortWatch:
+    """Ask for a restart when an LED Matrix port has no node in this /dev (see
+    RESTART_ON_NEW_PORT_ENV). Only a port missing on two checks in a row counts: the kernel
+    lists a new port a moment before its node appears."""
+
+    def __init__(
+        self,
+        request_restart: Callable[[], None],
+        *,
+        unreachable_ports: Callable[[], Sequence[str]] = unreachable_matrix_ports,
+        interval_seconds: float = PORT_WATCH_SECONDS,
+        logger: logging.Logger = LOGGER,
+    ) -> None:
+        self._request_restart = request_restart
+        self._unreachable_ports = unreachable_ports
+        self._interval = interval_seconds
+        self._logger = logger
+        self._seen: tuple[str, ...] = ()
+
+    def step(self) -> float:
+        unreachable = tuple(self._unreachable_ports())
+        if unreachable and unreachable == self._seen:
+            self._logger.warning(
+                "LED Matrix port %s is not in this container: exiting so it starts again with it",
+                ", ".join(unreachable),
+            )
+            self._request_restart()
+        self._seen = unreachable
+        return self._interval
+
+
 @dataclass(frozen=True, slots=True)
 class Loop:
     name: str
@@ -468,6 +505,7 @@ class Dashboard:
         background: Sequence[Loop],
         sound: Sound,
         on_stop: Sequence[Callable[[], None]] = (),
+        restart: threading.Event | None = None,
         join_timeout_seconds: float = JOIN_TIMEOUT_SECONDS,
         logger: logging.Logger = LOGGER,
     ) -> None:
@@ -475,10 +513,16 @@ class Dashboard:
         self._background = tuple(background)
         self._sound = sound
         self._on_stop = tuple(on_stop)
+        self._restart = restart or threading.Event()
         self._join_timeout = join_timeout_seconds
         self._logger = logger
         self._stop = threading.Event()
         self._threads: dict[str, threading.Thread] = {}
+
+    @property
+    def restart_requested(self) -> bool:
+        """A loop asked for the process to exit and start again (see PortWatch)."""
+        return self._restart.is_set()
 
     def start(self) -> None:
         for loop in (*(loop for loop, _shutdown in self._panels), *self._background):
@@ -575,12 +619,15 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         interval_seconds=weather_seconds,
         stale_after_seconds=max(WEATHER_STALE_MIN_SECONDS, 3 * weather_seconds),
     )
-    background = (
+    restart = threading.Event()
+    background = [
         Loop("sensors", sampler.step),
         Loop("weather", weather.step),
         Loop("sound-watch", SoundWatch(sound, wanted=lambda: wanted_capture(store.current())).step),
         Loop("control", control.step),
-    )
+    ]
+    if os.environ.get(RESTART_ON_NEW_PORT_ENV) == "1":
+        background.append(Loop("port-watch", PortWatch(restart.set).step))
     settings = store.current()
     LOGGER.info(
         "display: brightness %d%%, %s%s; layout: %s; equalizer source: %s",
@@ -590,7 +637,9 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         describe_layout(settings.layout),
         settings.audio_source,
     )
-    return Dashboard(panels=panels, background=background, sound=sound, on_stop=(control.close,))
+    return Dashboard(
+        panels=panels, background=background, sound=sound, on_stop=(control.close,), restart=restart
+    )
 
 
 def _location_resolver(config: DashboardConfig) -> LocationResolver:
@@ -611,6 +660,9 @@ class Runnable(Protocol):
 
     def stop(self) -> None: ...
 
+    @property
+    def restart_requested(self) -> bool: ...
+
 
 def run_dashboard(
     config: DashboardConfig,
@@ -618,7 +670,9 @@ def run_dashboard(
     dashboard_factory: Callable[[DashboardConfig], Runnable] = build_dashboard,
     logger: logging.Logger = LOGGER,
 ) -> int:
-    """Run until SIGTERM or SIGINT, then stop the loops and blank the panels."""
+    """Run until SIGTERM or SIGINT, then stop the loops and blank the panels.
+
+    Returns EXIT_PORTS_CHANGED instead of 0 when the dashboard asked to be started again."""
     stop_requested = threading.Event()
 
     received: list[int] = []
@@ -640,12 +694,16 @@ def run_dashboard(
     try:
         dashboard.start()
         logger.info("dashboard running")
-        while not stop_requested.is_set():
+        while not stop_requested.is_set() and not dashboard.restart_requested:
             time.sleep(0.2)
-        logger.info("received %s, stopping", signal.Signals(received[0]).name)
+        if received:
+            logger.info("received %s, stopping", signal.Signals(received[0]).name)
     finally:
         dashboard.stop()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
+    if not received:
+        logger.info("dashboard stopped to start again")
+        return EXIT_PORTS_CHANGED
     logger.info("dashboard stopped")
     return 0

@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from framework_led_dashboard.device_discovery import discover_matrix_devices
+from framework_led_dashboard.device_discovery import (
+    discover_matrix_devices,
+    unreachable_matrix_ports,
+)
 from framework_led_dashboard.serial_port import SerialPort, sysfs_ports
 
 
@@ -140,3 +143,27 @@ def test_sysfs_ports_name_a_single_interface_device_by_the_device(tmp_path: Path
 
     assert port.location == "3-1"
     assert port.serial_number == "X"
+
+
+def test_unreachable_ports_are_led_matrix_ports_without_their_node(tmp_path: Path) -> None:
+    """What the Docker variant's daemon watches for: its /dev has the ports of its start only."""
+    null = os.stat("/dev/null").st_rdev
+    tty = tmp_path / "class" / "tty"
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    for name, bus_path, number in (
+        ("ttyACM0", "1-3.3", f"{os.major(null)}:{os.minor(null)}"),  # its node: reachable
+        ("ttyACM1", "1-4.2", "166:1"),  # no node
+        ("ttyACM2", "1-4.3", "166:2"),  # a node of another device
+        ("ttyACM3", "1-4.4", "166:3"),  # not a device at all
+        ("ttyACM4", "1-4.5", "166:4"),  # not an LED Matrix
+    ):
+        _usb_acm_port(tmp_path, name, bus_path=bus_path, serial=name)
+        (tty / name / "dev").write_text(f"{number}\n", encoding="utf-8")
+    for name in ("ttyACM0", "ttyACM2"):
+        (dev / name).symlink_to("/dev/null")
+    (dev / "ttyACM3").write_text("", encoding="utf-8")
+    usb4 = (tty / "ttyACM4" / "device").resolve().parent
+    (usb4 / "idVendor").write_text("2341\n", encoding="utf-8")  # an Arduino
+
+    assert unreachable_matrix_ports(tty, dev) == ("ttyACM1", "ttyACM2", "ttyACM3")

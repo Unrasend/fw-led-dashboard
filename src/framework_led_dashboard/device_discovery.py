@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Protocol
 
 from .config import PanelsConfig
@@ -96,6 +99,33 @@ def map_panel_devices(
 def resolve_device_path(identity: str, port_provider: PortProvider | None = None) -> str:
     devices = list_system_matrix_devices(port_provider)
     return _find_unique(devices, identity).path
+
+
+def unreachable_matrix_ports(
+    tty_root: Path = Path("/sys/class/tty"), dev_root: Path = Path("/dev")
+) -> tuple[str, ...]:
+    """LED Matrix ports the kernel has but /dev cannot open: no node, or a node of another device.
+
+    Only the Docker variant meets them: its /dev holds the ports that were there when the
+    container started, so a module that comes back as another ttyACM (after a resume) is not.
+    """
+    unreachable = []
+    for port in sysfs_ports(tty_root, dev_root):
+        if port.vid != FRAMEWORK_VID or port.pid != LED_MATRIX_PID:
+            continue
+        name = Path(port.device).name
+        try:
+            major, minor = map(int, (tty_root / name / "dev").read_text().split(":"))
+        except (OSError, ValueError):
+            continue  # gone again since the listing
+        try:
+            node = os.stat(port.device)
+        except OSError:
+            unreachable.append(name)
+            continue
+        if not stat.S_ISCHR(node.st_mode) or node.st_rdev != os.makedev(major, minor):
+            unreachable.append(name)
+    return tuple(unreachable)
 
 
 def _find_unique(devices: Iterable[MatrixDevice], identity: str) -> MatrixDevice:

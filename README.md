@@ -140,8 +140,10 @@ keep the variant; `./install.sh --native` goes back and removes the image.
 
 The container gets only what the daemon needs — no `--privileged`:
 
-- the LED Matrix serial ports: `/dev` without what is mounted under it (no terminals, no
-  shared memory), and a device rule that opens ttyACM devices and nothing else;
+- the two LED Matrix modules' serial ports and no other device: not your `/dev`, and not
+  another serial device you plug in (an Arduino, a modem). A module that comes back under
+  another port, say after a resume, starts the container again with it — the panels go dark
+  for a few seconds;
 - sysfs, read-only as Docker always mounts it (ports, battery, temperatures, GPU load);
 - the PipeWire and Pulse sockets for the equalizer, and a folder of its own,
   `$XDG_RUNTIME_DIR/framework-led-dashboard`, for the control socket — never the whole

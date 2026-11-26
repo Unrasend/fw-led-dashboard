@@ -7,7 +7,8 @@ After=pipewire.service pipewire-pulse.service pipewire-pulse.socket
 
 [Service]
 Type=exec
-# Runs `docker run` in the foreground; SIGTERM reaches the daemon, which blanks the panels.
+# Runs `docker run` in the foreground, again when the LED Matrix ports change; SIGTERM
+# reaches the daemon, which blanks the panels.
 ExecStart=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker
 ExecStopPost=%h/.local/share/framework-led-dashboard/bin/framework-led-dashboard-docker --remove
 SyslogIdentifier=framework-led-dashboard

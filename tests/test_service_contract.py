@@ -24,6 +24,9 @@ TRAY_DESKTOP = ROOT / "packaging" / "framework-led-dashboard-tray.desktop"
 APP_ID = "io.github.unrasend.FwLedDashboard"
 MENU_DESKTOP = ROOT / "packaging" / f"{APP_ID}.desktop"
 INSTALL_SCRIPT = ROOT / "install.sh"
+PORTS_CHANGED = int(
+    re.search(r"^PORTS_CHANGED=(\d+)", DOCKER_WRAPPER.read_text(encoding="utf-8"), re.MULTILINE)[1]
+)
 
 
 def _ini(path: Path) -> configparser.ConfigParser:
@@ -452,23 +455,50 @@ def test_docker_unit_runs_the_wrapper_with_the_plain_units_restart_rules(
     assert docker["Unit"]["After"] == unit["Unit"]["After"]
 
 
-def _docker_command(tmp_path: Path, **env: str) -> list[str]:
-    script = tmp_path / "wrapper"
-    script.write_text(DOCKER_WRAPPER.read_text(encoding="utf-8").replace("@VERSION@", "9.9"))
+def _serial_port(tmp_path: Path, name: str, *, usb_id: str = "32ac:0020", node: bool = True) -> None:
+    """A USB serial port in a fake /sys and, with `node`, a character device in a fake /dev."""
+    vendor, product = usb_id.split(":")
+    device = tmp_path / "sys" / "devices" / "usb1" / name
+    interface = device / f"{name}:1.0"
+    interface.mkdir(parents=True)
+    (device / "idVendor").write_text(f"{vendor}\n", encoding="utf-8")
+    (device / "idProduct").write_text(f"{product}\n", encoding="utf-8")
+    tty = tmp_path / "sys" / "class" / "tty" / name
+    tty.mkdir(parents=True)
+    (tty / "device").symlink_to(interface)
+    if node:
+        (tmp_path / "dev").mkdir(exist_ok=True)
+        (tmp_path / "dev" / name).symlink_to("/dev/null")
+
+
+def _wrapper_env(tmp_path: Path, **env: str) -> dict[str, str]:
     runtime = tmp_path / "run"
     (runtime / "pulse").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "dev").mkdir(exist_ok=True)
+    return {
+        "HOME": str(tmp_path / "home"),
+        "PATH": os.environ["PATH"],
+        "XDG_RUNTIME_DIR": str(runtime),
+        "TZ": "Europe/Prague",
+        "LED_DASHBOARD_SYSFS": str(tmp_path / "sys"),
+        "LED_DASHBOARD_DEVICES": str(tmp_path / "dev"),
+        **env,
+    }
+
+
+def _wrapper(tmp_path: Path) -> Path:
+    script = tmp_path / "wrapper"
+    script.write_text(DOCKER_WRAPPER.read_text(encoding="utf-8").replace("@VERSION@", "9.9"))
+    return script
+
+
+def _docker_command(tmp_path: Path, **env: str) -> list[str]:
     result = subprocess.run(
-        ["/bin/bash", str(script), "--print"],
+        ["/bin/bash", str(_wrapper(tmp_path)), "--print"],
         capture_output=True,
         text=True,
         check=True,
-        env={
-            "HOME": str(tmp_path / "home"),
-            "PATH": os.environ["PATH"],
-            "XDG_RUNTIME_DIR": str(runtime),
-            "TZ": "Europe/Prague",
-            **env,
-        },
+        env=_wrapper_env(tmp_path, **env),
         timeout=30,
     )
     return subprocess.run(
@@ -478,6 +508,9 @@ def _docker_command(tmp_path: Path, **env: str) -> list[str]:
 
 
 def test_docker_wrapper_gives_the_container_only_what_the_daemon_needs(tmp_path: Path) -> None:
+    _serial_port(tmp_path, "ttyACM0")
+    _serial_port(tmp_path, "ttyACM1")
+    _serial_port(tmp_path, "ttyACM2", usb_id="2341:0043")  # an Arduino: not passed
     command = _docker_command(tmp_path)
     runtime = tmp_path / "run"
     text = " ".join(command)
@@ -489,10 +522,14 @@ def test_docker_wrapper_gives_the_container_only_what_the_daemon_needs(tmp_path:
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
     assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
-    # The serial ports and nothing else: /dev without its submounts (terminals, shared memory)
-    # and a device rule for ttyACM only.
-    assert "--mount=type=bind,src=/dev,dst=/dev,readonly,bind-recursive=disabled" in command
-    assert command[command.index("--device-cgroup-rule") + 1] == "c 166:* rmw"
+    # The two LED Matrix ports and no other device: no /dev of the desktop, no device rule.
+    devices = [command[index + 1] for index, part in enumerate(command) if part == "--device"]
+    assert devices == [
+        f"{tmp_path}/dev/ttyACM0:/dev/ttyACM0:rw",
+        f"{tmp_path}/dev/ttyACM1:/dev/ttyACM1:rw",
+    ]
+    assert "LED_DASHBOARD_RESTART_ON_NEW_PORT=1" in command
+    assert "dst=/dev" not in text and "--device-cgroup-rule" not in text
     # Only its own folder of the session's runtime directory, never all of it.
     assert f"--mount=type=bind,src={runtime}/framework-led-dashboard," in text
     assert f"src={runtime}," not in text
@@ -500,7 +537,7 @@ def test_docker_wrapper_gives_the_container_only_what_the_daemon_needs(tmp_path:
     assert "TZ=Europe/Prague" in command
     # A user-defined network of its own: isolated, and its DNS asks the desktop's resolver.
     assert command[command.index("--network") + 1] == "framework-led-dashboard"
-    for flag in ("--privileged", "--pid", "--ipc", "--cap-add", "--device"):
+    for flag in ("--privileged", "--pid", "--ipc", "--cap-add", "--volume", "-v"):
         assert not any(part == flag or part.startswith(f"{flag}=") for part in command), flag
     assert "docker.sock" not in text
 
@@ -524,6 +561,85 @@ def test_docker_wrapper_can_use_another_network_when_asked(tmp_path: Path) -> No
     command = _docker_command(tmp_path, LED_DASHBOARD_DOCKER_NETWORK="host")
 
     assert command[command.index("--network") + 1] == "host"
+
+
+def _run_wrapper_with_fake_docker(tmp_path: Path, run_script: str) -> subprocess.CompletedProcess[str]:
+    """Run the wrapper for real against a `docker` that logs each `run` and then does
+    `run_script` (shell, $1 = how many runs so far); its other commands succeed."""
+    fake = tmp_path / "bin" / "docker"
+    fake.parent.mkdir()
+    fake.write_text(
+        "#!/bin/bash\n"
+        '[[ "$1" == run ]] || exit 0\n'
+        f'printf \'%s\\n\' "$*" >> {tmp_path}/runs\n'
+        f'set -- "$(wc -l < {tmp_path}/runs)"\n'
+        f"{run_script}\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = tmp_path / "home" / ".config" / "framework-led-dashboard"
+    config.mkdir(parents=True)
+    (config / "config.toml").write_text("", encoding="utf-8")
+    env = _wrapper_env(tmp_path, PATH=f"{fake.parent}:{os.environ['PATH']}")
+    return subprocess.run(
+        ["/bin/bash", str(_wrapper(tmp_path))],
+        capture_output=True, text=True, check=False, env=env, timeout=30,
+    )
+
+
+def _runs(tmp_path: Path) -> list[str]:
+    return (tmp_path / "runs").read_text(encoding="utf-8").splitlines()
+
+
+def test_docker_wrapper_starts_the_container_again_with_a_port_that_turned_up(
+    tmp_path: Path,
+) -> None:
+    _serial_port(tmp_path, "ttyACM0")
+    _serial_port(tmp_path, "ttyACM2", node=False)  # its node appears while the first one runs
+    result = _run_wrapper_with_fake_docker(
+        tmp_path,
+        f'[[ $1 == 1 ]] && ln -s /dev/null {tmp_path}/dev/ttyACM2 && exit {PORTS_CHANGED}\nexit 0',
+    )
+
+    assert result.returncode == 0, result.stderr
+    first, second = _runs(tmp_path)
+    assert "/dev/ttyACM0:rw" in first and "ttyACM2" not in first
+    assert "/dev/ttyACM0:rw" in second and "/dev/ttyACM2:rw" in second
+    assert "LED Matrix ports changed: ttyACM0 ttyACM2" in result.stderr
+
+
+def test_docker_wrapper_leaves_it_to_systemd_when_the_ports_did_not_change(
+    tmp_path: Path,
+) -> None:
+    _serial_port(tmp_path, "ttyACM0")
+    result = _run_wrapper_with_fake_docker(tmp_path, f"exit {PORTS_CHANGED}")
+
+    assert result.returncode == 1
+    assert len(_runs(tmp_path)) == 1  # no loop: systemd's backoff decides
+    assert "LED Matrix ports unchanged (ttyACM0)" in result.stderr
+
+
+def test_docker_wrapper_does_not_start_again_once_asked_to_stop(tmp_path: Path) -> None:
+    _serial_port(tmp_path, "ttyACM0")
+    _serial_port(tmp_path, "ttyACM2", node=False)
+    # systemd's SIGTERM reaches the wrapper and docker run alike; even an exit that asks
+    # for a restart then ends it.
+    result = _run_wrapper_with_fake_docker(
+        tmp_path, f"ln -s /dev/null {tmp_path}/dev/ttyACM2; kill -TERM $PPID; exit {PORTS_CHANGED}"
+    )
+
+    assert result.returncode == PORTS_CHANGED
+    assert len(_runs(tmp_path)) == 1
+
+
+def test_docker_wrapper_and_daemon_agree_on_the_restart_contract() -> None:
+    from framework_led_dashboard.app import EXIT_PORTS_CHANGED, RESTART_ON_NEW_PORT_ENV
+
+    text = DOCKER_WRAPPER.read_text(encoding="utf-8")
+    assert PORTS_CHANGED == EXIT_PORTS_CHANGED
+    assert f"--env {RESTART_ON_NEW_PORT_ENV}=1" in text
+    # The plain unit's restart rules still apply on top: 3 is not a "do not restart" status.
+    assert str(EXIT_PORTS_CHANGED) not in _ini(DOCKER_UNIT)["Service"]["RestartPreventExitStatus"]
 
 
 def test_docker_wrapper_rejects_unknown_options() -> None:

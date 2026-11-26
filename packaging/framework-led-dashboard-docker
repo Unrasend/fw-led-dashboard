@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Run the Framework LED Matrix dashboard in Docker; the systemd user service starts it after
 # `install.sh --docker`. The container gets only what the daemon needs:
-#   - the LED Matrix serial ports: /dev without what is mounted under it (no terminals, no
-#     shared memory), and a device rule that lets it open ttyACM devices and nothing else;
+#   - the two LED Matrix modules' serial ports and no other device: each passed with --device
+#     as it is when the container starts. A module that comes back as another ttyACM (after a
+#     resume) makes the daemon exit with PORTS_CHANGED, and the container starts again with
+#     the ports as they are then;
 #   - sysfs, read-only as Docker always mounts it: ports, battery, temperatures, GPU load;
 #   - the PipeWire and Pulse sockets, for the equalizer;
 #   - a folder of its own for the control socket the tray and the settings window use;
@@ -15,6 +17,7 @@
 # It runs as you, without capabilities or new privileges, on a read-only root.
 #
 #   framework-led-dashboard-docker           run in the foreground until SIGTERM
+#                                            (again when the LED Matrix ports change)
 #   framework-led-dashboard-docker --print   print the docker command instead
 #   framework-led-dashboard-docker --remove  remove a container left behind
 set -euo pipefail
@@ -22,7 +25,10 @@ set -euo pipefail
 NAME=framework-led-dashboard
 NETWORK=${LED_DASHBOARD_DOCKER_NETWORK:-framework-led-dashboard}
 IMAGE=${LED_DASHBOARD_IMAGE:-framework-led-dashboard:@VERSION@}
-TTY_ACM_MAJOR=166  # /dev/ttyACM*, the LED Matrix modules
+MATRIX_USB_ID=32ac:0020  # Framework LED Matrix Input Module
+PORTS_CHANGED=3  # the daemon's exit status when a module turned up under a port it lacks
+SYSFS=${LED_DASHBOARD_SYSFS:-/sys}  # both moved only by the tests
+DEVICES=${LED_DASHBOARD_DEVICES:-/dev}
 
 uid=$(id -u)
 gid=$(id -g)
@@ -32,9 +38,23 @@ config=${XDG_CONFIG_HOME:-$HOME/.config}/framework-led-dashboard
 state=${XDG_STATE_HOME:-$HOME/.local/state}/framework-led-dashboard
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/framework-led-dashboard
 COMMAND=()
+STOPPING=
 
 bind() {
     printf -- '--mount=type=bind,src=%s,dst=%s%s' "$1" "$2" "${3:-}"
+}
+
+# The LED Matrix modules' serial ports that have a device node, e.g. ttyACM0, one per line.
+matrix_ports() {
+    local tty usb vendor product
+    for tty in "$SYSFS"/class/tty/ttyACM*; do
+        usb=$(readlink -f "$tty/device/..") || continue
+        vendor=$(cat "$usb/idVendor" 2>/dev/null) || continue
+        product=$(cat "$usb/idProduct" 2>/dev/null) || continue
+        if [[ "$vendor:$product" == "$MATRIX_USB_ID" && -c "$DEVICES/${tty##*/}" ]]; then
+            printf '%s\n' "${tty##*/}"
+        fi
+    done
 }
 
 # Groups that own the serial ports (uucp, dialout), for systems that grant them by group
@@ -42,8 +62,8 @@ bind() {
 port_groups() {
     local port
     {
-        for port in /dev/ttyACM*; do
-            [[ -e "$port" ]] && stat -c %g "$port"
+        for port in "$@"; do
+            stat -L -c %g "$DEVICES/$port" 2>/dev/null || true  # gone meanwhile
         done
         getent group uucp dialout | cut -d: -f3
     } | sort -un
@@ -70,8 +90,6 @@ build_command() {
         --read-only --tmpfs /tmp
         --cap-drop ALL --security-opt no-new-privileges
         --pids-limit 64 --memory 256m
-        "$(bind /dev /dev ,readonly,bind-recursive=disabled)"
-        --device-cgroup-rule "c $TTY_ACM_MAJOR:* rmw"
         "$(bind "$config" /config ,readonly)"
         "$(bind "$state" /state/framework-led-dashboard)"
         "$(bind "$cache" /cache/framework-led-dashboard)"
@@ -79,11 +97,16 @@ build_command() {
         --env "XDG_RUNTIME_DIR=$inside"
         --env XDG_STATE_HOME=/state
         --env XDG_CACHE_HOME=/cache
-        --env HOME=/tmp)
-    local group socket zone
+        --env HOME=/tmp
+        --env LED_DASHBOARD_RESTART_ON_NEW_PORT=1)
+    local ports port group socket zone
+    mapfile -t ports < <(matrix_ports)
+    for port in "${ports[@]}"; do
+        COMMAND+=(--device "$DEVICES/$port:/dev/$port:rw")
+    done
     while read -r group; do
         COMMAND+=(--group-add "$group")
-    done < <(port_groups)
+    done < <(port_groups "${ports[@]}")
     for socket in pipewire-0 pulse/native; do
         if [[ -S "$runtime/$socket" ]]; then
             COMMAND+=("$(bind "$runtime/$socket" "$inside/$socket")")
@@ -123,12 +146,30 @@ main() {
         mkdir -p "$folder"
         chmod 700 "$folder"
     done
-    build_command
-    docker rm --force "$NAME" >/dev/null 2>&1 || true  # one left by a crash
     if [[ "$NETWORK" == "$NAME" ]] && ! docker network inspect "$NETWORK" >/dev/null 2>&1; then
         docker network create "$NETWORK" >/dev/null
     fi
-    exec "${COMMAND[@]}"
+    # SIGTERM reaches docker run too (systemd signals the whole service): it passes it on to the
+    # daemon, which blanks the panels and exits; the trap only keeps the loop from starting
+    # the container again.
+    trap 'STOPPING=1' TERM INT
+    local ports status
+    while true; do
+        ports=$(matrix_ports)
+        build_command
+        docker rm --force "$NAME" >/dev/null 2>&1 || true  # one left by a crash
+        status=0
+        "${COMMAND[@]}" || status=$?
+        if [[ -n "$STOPPING" || $status -ne $PORTS_CHANGED ]]; then
+            return "$status"
+        fi
+        if [[ "$(matrix_ports)" == "$ports" ]]; then
+            # Nothing a new container would get: let systemd's backoff handle it.
+            printf 'LED Matrix ports unchanged (%s), not starting again\n' "${ports//$'\n'/ }" >&2
+            return 1
+        fi
+        printf 'LED Matrix ports changed: %s\n' "$(matrix_ports | paste -sd ' ')" >&2
+    done
 }
 
 main "$@"
