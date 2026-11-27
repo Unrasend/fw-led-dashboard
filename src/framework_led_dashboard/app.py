@@ -30,7 +30,7 @@ from .control import (
 )
 from .device_discovery import resolve_device_path, unreachable_matrix_ports
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from .layout import SIDES, bar_rules
+from .layout import SIDES, Layout, bar_rules
 from .location import (
     Coordinates,
     IpLocationClient,
@@ -115,18 +115,35 @@ class DashboardState:
 
 
 def panel_targets(config: DashboardConfig) -> dict[str, str]:
-    """USB identity of the physical left and right panel.
+    """USB identity of each physical panel the config names: both, or only the left or only
+    the right one on a laptop with a single LED Matrix module.
 
     Which widgets each one shows is a live setting (DisplaySettings.layout and swap_panels,
     the latter starting from config.swap_panels), applied by render_side on every frame.
     """
-    left = config.panels.left.identity
-    right = config.panels.right.identity
-    if left is None or right is None:
+    targets = {
+        side: identity
+        for side in SIDES
+        if (identity := getattr(config.panels, side).identity) is not None
+    }
+    if not targets:
         raise ConfigError(
-            "configure panels.left.identity and panels.right.identity (see --list-panels)"
+            "configure panels.left.identity, panels.right.identity or both (see --list-panels)"
         )
-    return {"left": left, "right": right}
+    return targets
+
+
+def shown_layout(settings: DisplaySettings, panels: Sequence[str] = SIDES) -> Layout:
+    """The layout without the widgets that no module in `panels` shows. With both modules
+    that is all of it; with one, only the side that module shows (the other one's when
+    swapped), so an equalizer or a bar nobody sees is neither captured nor watched."""
+    shown: dict[str, tuple] = {side: () for side in SIDES}
+    for panel in panels:
+        side = panel
+        if settings.swap_panels:
+            side = "right" if panel == "left" else "left"
+        shown[side] = settings.layout.side(side)
+    return Layout(**shown)
 
 
 def render_side(
@@ -155,15 +172,18 @@ def render_side(
     ).snapshot()
 
 
-def wanted_capture(settings: DisplaySettings) -> CaptureRequest | None:
+def wanted_capture(
+    settings: DisplaySettings, panels: Sequence[str] = SIDES
+) -> CaptureRequest | None:
     """What to capture for the equalizers: nothing while the panels are off or no panel has
     one; the system sound in stereo only when both panels have one (left and right)."""
     if not settings.enabled:
         return None
+    layout = shown_layout(settings, panels)
     sides = [
         side
         for side in SIDES
-        if any(widget.kind == "equalizer" for widget in settings.layout.side(side))
+        if any(widget.kind == "equalizer" for widget in layout.side(side))
     ]
     if not sides:
         return None
@@ -577,14 +597,16 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
 
     def current_frames() -> dict[str, FramePixels]:
         now = time.monotonic()
-        return {side: render(side, now) for side in SIDES}
+        return {side: render(side, now) for side in targets}
 
-    control = ControlServer(store, path=default_socket_path(), frames=current_frames)
+    control = ControlServer(
+        store, path=default_socket_path(), frames=current_frames, panels=tuple(targets)
+    )
     control.open()
     prepare = prepare_panel(lambda: store.current().brightness_percent)
 
     panels = []
-    for side in SIDES:
+    for side in targets:
         transport = MatrixTransport(
             identity=targets[side],
             path_resolver=resolve_device_path,
@@ -604,7 +626,7 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
         read_metrics=SystemMetricsProvider().read,
         read_cpu_temperature=CpuTemperatureProvider().read_celsius,
         read_gpu_temperature=GpuTemperatureProvider().read_celsius,
-        bar_rules=lambda: bar_rules(store.current().layout),
+        bar_rules=lambda: bar_rules(shown_layout(store.current(), tuple(targets))),
         alert_policy=AlertPolicy(
             config.alerts,
             cpu_temperature_critical=lambda: store.current().cpu_alert_celsius,
@@ -623,12 +645,17 @@ def build_dashboard(config: DashboardConfig) -> Dashboard:
     background = [
         Loop("sensors", sampler.step),
         Loop("weather", weather.step),
-        Loop("sound-watch", SoundWatch(sound, wanted=lambda: wanted_capture(store.current())).step),
+        Loop(
+            "sound-watch",
+            SoundWatch(sound, wanted=lambda: wanted_capture(store.current(), tuple(targets))).step,
+        ),
         Loop("control", control.step),
     ]
     if os.environ.get(RESTART_ON_NEW_PORT_ENV) == "1":
         background.append(Loop("port-watch", PortWatch(restart.set).step))
     settings = store.current()
+    if len(targets) == 1:
+        LOGGER.info("one LED Matrix module, as the %s panel", next(iter(targets)))
     LOGGER.info(
         "display: brightness %d%%, %s%s; layout: %s; equalizer source: %s",
         settings.brightness_percent,

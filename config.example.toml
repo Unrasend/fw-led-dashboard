@@ -1,4 +1,4 @@
-# Framework LED dashboard — safe defaults for two 9x34 LED Matrix modules.
+# Framework LED dashboard — safe defaults for one or two 9x34 LED Matrix modules.
 brightness_percent = 40
 # Frame-rate cap per panel; grayscale output tops out near 7 FPS in the panel firmware.
 animation_fps = 10
@@ -7,6 +7,7 @@ animation_fps = 10
 swap_panels = false
 
 # USB identities from `framework-led-dashboard --list-panels`; the installer fills them in.
+# With a single module one of the two stays empty (the installer uses [panels.left]).
 [panels.left]
 identity = ""
 

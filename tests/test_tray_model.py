@@ -95,6 +95,18 @@ def test_menu_keeps_only_the_quick_controls() -> None:
     ]
 
 
+def test_menu_for_a_single_module_has_no_swap() -> None:
+    menu = build_menu(DisplaySettings(40), RecordingActions(), swap=False)
+
+    assert menu.find(SWAP_ID) is None
+    assert [item.label for item in menu.children if not item.separator] == [
+        "LED Matrix",
+        "Brightness: 40 %",
+        "Settings…",
+        "Quit tray",
+    ]
+
+
 def test_menu_items_call_the_matching_actions() -> None:
     actions = RecordingActions()
     menu = build_menu(DisplaySettings(40, enabled=True), actions)

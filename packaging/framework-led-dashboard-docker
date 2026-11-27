@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the Framework LED Matrix dashboard in Docker; the systemd user service starts it after
 # `install.sh --docker`. The container gets only what the daemon needs:
-#   - the two LED Matrix modules' serial ports and no other device: each passed with --device
+#   - the LED Matrix modules' serial ports and no other device: each passed with --device
 #     as it is when the container starts. A module that comes back as another ttyACM (after a
 #     resume) makes the daemon exit with PORTS_CHANGED, and the container starts again with
 #     the ports as they are then;

@@ -1,5 +1,5 @@
 [Unit]
-Description=Framework 16 LED Matrix dashboard (both panels), in Docker
+Description=Framework 16 LED Matrix dashboard, in Docker
 # Starts with your session, like the plain service: the sound sockets and the folder for the
 # control socket exist only then (a container Docker starts at boot would find neither).
 Wants=pipewire-pulse.socket

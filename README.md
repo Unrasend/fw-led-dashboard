@@ -1,7 +1,8 @@
 # Framework LED Matrix dashboard
 
-A small Linux daemon that turns the two 9×34 **LED Matrix input modules** of a
-[Framework Laptop 16](https://frame.work/laptop16) into a live system dashboard. You choose
+A small Linux daemon that turns the 9×34 **LED Matrix input modules** of a
+[Framework Laptop 16](https://frame.work/laptop16) — two, or just one — into a live system
+dashboard. You choose
 what each module shows in a small settings window; a GTK tray icon keeps on/off, brightness
 and the panel swap at hand.
 
@@ -48,7 +49,7 @@ wget -qO- https://github.com/Unrasend/fw-led-dashboard/releases/latest/download/
 
 ## Requirements
 
-- Framework Laptop 16 with **two** LED Matrix input modules (stock firmware).
+- Framework Laptop 16 with **one or two** LED Matrix input modules (stock firmware).
 - Linux with a systemd user session and Python ≥ 3.11 — Ubuntu 24.04, Fedora 39, Debian 12,
   Arch and newer. The dashboard itself uses nothing but Python's standard library.
 - The installer checks for the rest and offers to install it with your package manager
@@ -103,8 +104,8 @@ The installer:
    `--no-packages` never touches them);
 2. copies the program to `~/.local/share/framework-led-dashboard` — no venv, no pip, no
    downloads from PyPI;
-3. detects both panels and writes `~/.config/framework-led-dashboard/config.toml` — only if
-   it does not exist yet;
+3. detects the panels, one or two, and writes
+   `~/.config/framework-led-dashboard/config.toml` — only if it does not exist yet;
 4. installs, enables and starts the `framework-led-dashboard` systemd user service;
 5. starts the tray icon and adds it to `~/.config/autostart`, and adds *LED Matrix Dashboard*
    to the application menu;
@@ -113,6 +114,12 @@ The installer:
 
 **Bars on the right and weather on the left?** Turn on *Swap panels* in the tray menu or the
 settings window; the panels swap at once and the choice is kept.
+
+**One module?** It is set up as the left panel, whichever side of the keyboard it is on, and
+starts with the left side's widgets: the outside temperature, the bars and the equalizer. The
+settings window draws just that module, and *Swap panels* is gone from it and from the tray.
+When you add a second module, put its identity from `--list-panels` into `[panels.right]` of
+the config and restart the service.
 
 **Update:** run the same `wget … | bash` line again (or `git pull` and `./install.sh` in a
 checkout). **Remove** — stops and removes the service, the tray, the menu entry and the
@@ -234,7 +241,7 @@ config and restart it.
 |---|---|
 | `--list-panels` | print the connected LED Matrix modules and their USB identities |
 | `--check-config PATH` | validate a config and print it normalized |
-| `--init-config TEMPLATE PATH` | write a new config from a template with both panels filled in |
+| `--init-config TEMPLATE PATH` | write a new config from a template with the connected panels (one or two) filled in |
 | `--run PATH` | run the dashboard in the foreground until Ctrl+C / SIGTERM |
 | `--tray` | show the tray icon |
 | `--settings` | open the settings window (or raise it if it is open) |
@@ -249,7 +256,7 @@ Restart the service after editing it.
 | `brightness_percent` | `40` | starting brightness; the tray and the settings window override it |
 | `animation_fps` | `10` | frame-rate cap per panel (the hardware tops out near 7) |
 | `swap_panels` | `false` | starting value of *Swap panels*; the tray and the settings window override it |
-| `panels.left.identity`, `panels.right.identity` | detected | USB serial or location from `--list-panels` |
+| `panels.left.identity`, `panels.right.identity` | detected | USB serial or location from `--list-panels`; with a single module one of them stays empty |
 | `location.latitude`, `location.longitude` | unset | fixed coordinates for the weather; skips geolocation |
 | `location.ip_lookup_enabled` | `true` | allow IP geolocation via ipwho.is |
 | `location.ip_lookup_ttl_seconds` | `21600` | how long an IP location is reused |
@@ -278,7 +285,7 @@ cached location, then the city of the system time zone. Weather requests send on
 
 ## How it works
 
-One process owns both panels: a sender thread per panel, a 1 Hz sensor loop, a weather loop,
+One process owns the panels: a sender thread per panel, a 1 Hz sensor loop, a weather loop,
 a `parec` (or `pw-record`) capture with a small FFT for the spectrum, and a Unix socket
 (`$XDG_RUNTIME_DIR/framework-led-dashboard/control.sock`, owner-only) for the tray and the settings
 window, which also asks it for the frames it shows. The renderer is a pure function from

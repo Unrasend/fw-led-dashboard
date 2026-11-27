@@ -1,5 +1,5 @@
 [Unit]
-Description=Framework 16 LED Matrix dashboard (both panels)
+Description=Framework 16 LED Matrix dashboard
 # The equalizer captures the microphone through PipeWire's Pulse server. Start after it so the
 # first capture does not race the audio stack at login (that race killed the old visualizer).
 Wants=pipewire-pulse.socket
@@ -18,7 +18,7 @@ RestartSteps=5
 RestartMaxDelaySec=60s
 # 2 = configuration error: restarting cannot fix it.
 RestartPreventExitStatus=2
-# On SIGTERM the daemon finishes the frame in flight, then blanks and closes both panels.
+# On SIGTERM the daemon finishes the frame in flight, then blanks and closes the panels.
 TimeoutStopSec=20s
 NoNewPrivileges=true
 

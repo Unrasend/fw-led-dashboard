@@ -251,8 +251,41 @@ def test_cli_init_config_never_overwrites_an_existing_config(
     assert "already exists" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("identities", [[], ["1-3.3:1.0"], ["a", "b", "c"]])
-def test_cli_init_config_needs_exactly_two_panels(
+def test_fill_panel_identities_leaves_a_missing_right_module_empty() -> None:
+    from framework_led_dashboard.config import fill_panel_identities
+
+    template = EXAMPLE_CONFIG.read_text(encoding="utf-8")
+
+    filled = fill_panel_identities(template, left="1-4.2:1.0", right=None)
+
+    config = parse_config(__import__("tomllib").loads(filled))
+    assert config.panels.left.identity == "1-4.2:1.0"
+    assert config.panels.right.identity is None
+
+
+def test_cli_init_config_sets_a_single_module_up_as_the_left_panel(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from framework_led_dashboard.__main__ import main
+    from framework_led_dashboard.app import panel_targets
+
+    target = tmp_path / "config" / "config.toml"
+
+    exit_code = main(
+        ["--init-config", str(EXAMPLE_CONFIG), str(target)],
+        panel_lister=lambda: [_device("1-3.3:1.0")],
+    )
+
+    assert exit_code == 0
+    assert panel_targets(load_config(target)) == {"left": "1-3.3:1.0"}
+    output = capsys.readouterr().out
+    assert "one panel" in output and "[panels.right]" in output
+    assert "Swap panels" not in output
+
+
+@pytest.mark.parametrize("identities", [[], ["a", "b", "c"]])
+def test_cli_init_config_needs_one_or_two_panels(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     identities: list[str],

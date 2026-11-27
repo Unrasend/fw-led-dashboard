@@ -82,7 +82,10 @@ def layout(item: MenuItem, depth: int = -1, names: Sequence[str] = ()) -> Layout
     return item.id, props, children
 
 
-def build_menu(settings: DisplaySettings | None, actions: MenuActions) -> MenuItem:
+def build_menu(
+    settings: DisplaySettings | None, actions: MenuActions, *, swap: bool = True
+) -> MenuItem:
+    """`swap` is off with a single module: there is nothing to swap it with."""
     reachable = settings is not None
     settings = settings or DisplaySettings(40)
     items = [
@@ -105,7 +108,9 @@ def build_menu(settings: DisplaySettings | None, actions: MenuActions) -> MenuIt
             toggle="checkmark",
             checked=settings.swap_panels,
             action=lambda: actions.set_swap(not settings.swap_panels),
-        ),
+        )
+        if swap
+        else None,
         MenuItem(5, separator=True),
         MenuItem(SETTINGS_ID, "Settings…", action=actions.open_settings),
         MenuItem(13, separator=True),

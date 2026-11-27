@@ -55,7 +55,7 @@ def main(
     action.add_argument(
         "--run",
         metavar="PATH",
-        help="run the dashboard on both panels with configuration PATH until SIGTERM",
+        help="run the dashboard on the configured panels with configuration PATH until SIGTERM",
     )
     action.add_argument(
         "--tray",
@@ -71,7 +71,7 @@ def main(
         "--init-config",
         nargs=2,
         metavar=("TEMPLATE", "PATH"),
-        help="write PATH from TEMPLATE with the two connected panels filled in",
+        help="write PATH from TEMPLATE with the connected panels (one or two) filled in",
     )
     arguments = parser.parse_args(argv)
 
@@ -134,17 +134,18 @@ def _init_config(template: Path, target: Path, *, panel_lister: PanelLister) -> 
     except OSError as error:
         print(f"device discovery error: {error}", file=sys.stderr)
         return 2
-    if len(identities) != 2:
+    if len(identities) not in (1, 2):
         print(
             f"found {len(identities)} LED Matrix panels ({', '.join(identities) or 'none'}), "
-            "need exactly 2; connect both, or copy the template and fill panels.*.identity "
+            "need 1 or 2; connect them, or copy the template and fill panels.*.identity "
             "from --list-panels",
             file=sys.stderr,
         )
         return 2
     # On the Framework 16 this was calibrated on, the module on the higher hub port is the
     # left one; "Swap panels" in the tray or the settings fixes it if another unit differs.
-    left, right = identities
+    # A single module is set up as the left one, whichever side of the keyboard it is on.
+    left, right = identities[0], (identities[1] if len(identities) == 2 else None)
     try:
         filled = fill_panel_identities(template.read_text(encoding="utf-8"), left=left, right=right)
     except (ConfigError, OSError) as error:
@@ -152,6 +153,13 @@ def _init_config(template: Path, target: Path, *, panel_lister: PanelLister) -> 
         return 2
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(filled, encoding="utf-8")
+    if right is None:
+        print(f"wrote {target}: one panel, {left}")
+        print(
+            "A second LED Matrix module, if you add one: put its identity from --list-panels "
+            "into [panels.right] there and restart the dashboard."
+        )
+        return 0
     print(f"wrote {target}: left panel {left}, right panel {right}")
     print('If the bars appear on the right panel, turn on "Swap panels" in the tray menu.')
     return 0

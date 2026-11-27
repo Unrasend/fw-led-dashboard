@@ -29,6 +29,7 @@ from framework_led_dashboard.app import (
     panel_targets,
     render_side,
     run_dashboard,
+    shown_layout,
     wanted_capture,
 )
 from framework_led_dashboard.audio import CaptureRequest, Spectrum
@@ -177,9 +178,49 @@ def test_panel_targets_stay_physical_when_the_config_swaps_panels() -> None:
     assert panel_targets(swapped) == {"left": "L", "right": "R"}
 
 
-def test_panel_targets_require_both_identities() -> None:
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_panel_targets_take_a_single_module_on_either_side(side: str) -> None:
+    assert panel_targets(parse_config({"panels": {side: {"identity": "M"}}})) == {side: "M"}
+
+
+def test_panel_targets_require_an_identity() -> None:
     with pytest.raises(ConfigError, match="identity"):
-        panel_targets(parse_config({"panels": {"left": {"identity": "L"}}}))
+        panel_targets(parse_config({"panels": {"left": {"identity": " "}}}))
+
+
+def test_shown_layout_keeps_only_what_the_connected_modules_show() -> None:
+    layout = Layout(left=(bars(),), right=(weather(),))
+
+    assert shown_layout(DisplaySettings(40, layout=layout)) == layout
+    assert shown_layout(DisplaySettings(40, layout=layout), ("left",)) == Layout(
+        left=(bars(),), right=()
+    )
+    # Swapped, the left module shows the right side's widgets.
+    assert shown_layout(DisplaySettings(40, layout=layout, swap_panels=True), ("left",)) == Layout(
+        left=(), right=(weather(),)
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected"),
+    [
+        # Stereo needs an equalizer on two modules; one module gets one channel.
+        (DisplaySettings(40, audio_source="system"), CaptureRequest("system", 1)),
+        # An equalizer only on the side without a module is never captured for...
+        (DisplaySettings(40, layout=Layout(left=(bars(),), right=(equalizer(),))), None),
+        # ...unless the swap puts that side on the module.
+        (
+            DisplaySettings(
+                40, swap_panels=True, layout=Layout(left=(bars(),), right=(equalizer(),))
+            ),
+            CaptureRequest("microphone", 1),
+        ),
+    ],
+)
+def test_wanted_capture_with_a_single_module(
+    settings: DisplaySettings, expected: CaptureRequest | None
+) -> None:
+    assert wanted_capture(settings, ("left",)) == expected
 
 
 def test_render_side_draws_the_classic_layout_like_the_old_panels() -> None:

@@ -6,9 +6,10 @@ Protocol: one JSON object per line, one request per connection.
   {"command": "frames"}
 Settable fields: brightness_percent, enabled, swap_panels, cpu_alert_celsius, layout (see
 layout.py), audio_source ("microphone" or "system").
-Answer: {"ok": true, <every field>} or {"ok": false, "error": "..."}; for "frames",
-{"ok": true, "left": "<hex>", "right": "<hex>"}: what each physical panel shows now, 34 rows of
-9 pixels, one byte per pixel, rendered even while the panels are off.
+Answer: {"ok": true, <every field>, "panels": ["left", "right"]} or {"ok": false, "error":
+"..."}; "panels" names the modules the dashboard drives, one of them on a laptop with a single
+module. For "frames", {"ok": true, "left": "<hex>", "right": "<hex>"}: what each of those
+modules shows now, 34 rows of 9 pixels, one byte per pixel, rendered even while they are off.
 """
 
 from __future__ import annotations
@@ -18,14 +19,14 @@ import logging
 import os
 import socket
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .audio import AUDIO_SOURCES
 from .config import CPU_ALERT_MAX_CELSIUS, CPU_ALERT_MIN_CELSIUS
 from .frame import FRAME_HEIGHT, FRAME_WIDTH, FramePixels
-from .layout import DEFAULT_LAYOUT, Layout, Widget, default_layout, layout_from_json
+from .layout import DEFAULT_LAYOUT, SIDES, Layout, Widget, default_layout, layout_from_json
 from .scheduler import LOGGER
 
 MAX_MESSAGE_BYTES = 16384
@@ -242,7 +243,11 @@ FrameSource = Callable[[], Mapping[str, FramePixels]]
 
 
 def handle_request(
-    store: SettingsStore, request: object, *, frames: FrameSource | None = None
+    store: SettingsStore,
+    request: object,
+    *,
+    frames: FrameSource | None = None,
+    panels: Sequence[str] = SIDES,
 ) -> dict[str, object]:
     if not isinstance(request, dict):
         return _error("request must be a JSON object")
@@ -265,12 +270,12 @@ def handle_request(
             )
         elif command == "frames" and frames is not None:
             shown = frames()
-            return {"ok": True, **{side: encode_frame(shown[side]) for side in ("left", "right")}}
+            return {"ok": True, **{side: encode_frame(shown[side]) for side in panels}}
         else:
             return _error("command must be 'status', 'set' or 'frames'")
     except (TypeError, ValueError) as error:
         return _error(str(error))
-    return {"ok": True, **settings.to_json()}
+    return {"ok": True, **settings.to_json(), "panels": list(panels)}
 
 
 def encode_frame(frame: FramePixels) -> str:
@@ -295,11 +300,13 @@ class ControlServer:
         *,
         path: Path,
         frames: FrameSource | None = None,
+        panels: Sequence[str] = SIDES,
         accept_timeout_seconds: float = 0.5,
         logger: logging.Logger = LOGGER,
     ) -> None:
         self._store = store
         self._frames = frames
+        self._panels = tuple(panels)
         self._path = path
         self._accept_timeout = accept_timeout_seconds
         self._logger = logger
@@ -332,7 +339,10 @@ class ControlServer:
             connection.settimeout(CONNECTION_TIMEOUT_SECONDS)
             try:
                 response = handle_request(
-                    self._store, _read_message(connection), frames=self._frames
+                    self._store,
+                    _read_message(connection),
+                    frames=self._frames,
+                    panels=self._panels,
                 )
             except ValueError as error:
                 response = _error(str(error))
@@ -363,6 +373,8 @@ class ControlClient:
     ) -> None:
         self._path = path or default_socket_path()
         self._timeout = timeout_seconds
+        # The modules the dashboard drives, as its last answer to status() or set() named them.
+        self.panels: tuple[str, ...] = SIDES
 
     def status(self) -> DisplaySettings:
         return self._settings(self._request({"command": "status"}))
@@ -393,12 +405,15 @@ class ControlClient:
         return self._settings(self._request(request))
 
     def frames(self) -> dict[str, FramePixels]:
-        """What the left and the right panel show now."""
+        """What each module the dashboard drives shows now: the left, the right or both."""
         response = self._request({"command": "frames"})
         try:
-            return {side: decode_frame(response[side]) for side in ("left", "right")}  # type: ignore[arg-type]
-        except (KeyError, TypeError, ValueError) as error:
+            frames = {side: decode_frame(response[side]) for side in SIDES if side in response}  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
             raise ControlError(f"invalid answer from dashboard: {error}") from error
+        if not frames:
+            raise ControlError("invalid answer from dashboard: no frames")
+        return frames
 
     def _request(self, request: dict[str, object]) -> dict[str, object]:
         try:
@@ -418,12 +433,19 @@ class ControlClient:
             raise ControlError(str(response.get("error", "request failed")))
         return response
 
-    @staticmethod
-    def _settings(response: dict[str, object]) -> DisplaySettings:
+    def _settings(self, response: dict[str, object]) -> DisplaySettings:
         try:
-            return settings_from_json(response, DisplaySettings(0))
+            settings = settings_from_json(response, DisplaySettings(0))
+            self.panels = _panels(response.get("panels", list(SIDES)))  # 1.6 and older: no "panels"
         except (KeyError, TypeError, ValueError) as error:
             raise ControlError(f"invalid answer from dashboard: {error}") from error
+        return settings
+
+
+def _panels(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw or any(side not in SIDES for side in raw):
+        raise ValueError("panels must name the left module, the right one or both")
+    return tuple(side for side in SIDES if side in raw)
 
 
 def _socket_answers(path: Path) -> bool:

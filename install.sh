@@ -21,7 +21,7 @@
 # Installs:
 #   ~/.local/share/framework-led-dashboard/lib    the program (bin/ starts it with python3)
 #   ~/.local/share/framework-led-dashboard/src    the unpacked release (piped installs only)
-#   ~/.config/framework-led-dashboard/config.toml created once, with both panels detected
+#   ~/.config/framework-led-dashboard/config.toml created once, with the panels detected
 #   ~/.config/systemd/user/framework-led-dashboard.service   enabled and (re)started
 #   ~/.config/autostart/framework-led-dashboard-tray.desktop  tray icon at login
 #   ~/.local/share/applications, ~/.local/share/icons         "LED Matrix Dashboard" settings
@@ -402,7 +402,7 @@ install_dashboard() {
         note "copied $PROJECT_DIR/config.toml"
     else
         "$BIN" --init-config "$PROJECT_DIR/config.example.toml" "$CONFIG_DIR/config.toml" \
-            || fail "could not detect both panels; see '$BIN --list-panels'"
+            || fail "could not detect the LED Matrix modules (one or two); see '$BIN --list-panels'"
     fi
     "$BIN" --check-config "$CONFIG_DIR/config.toml" >/dev/null \
         || fail "$CONFIG_DIR/config.toml is invalid"

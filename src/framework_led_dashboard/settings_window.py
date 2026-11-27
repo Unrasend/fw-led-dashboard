@@ -4,8 +4,9 @@ It runs as a process of its own (`--settings`, the "LED Matrix Dashboard" menu e
 tray's "Settings…") and exits when closed, so it takes memory only while it is open; starting
 it again raises the open window.
 
-Both modules are drawn from the frames the dashboard shows right now (the control socket's
-"frames" command, a few times a second), with an outline around each widget. Click a widget
+Both modules (or the only one) are drawn from the frames the dashboard shows right now (the
+control socket's "frames" command, a few times a second), with an outline around each widget.
+Click a widget
 to select it and change its settings on the right; drag it up or down or onto the other module;
 drag it into empty rows to place it there; drag the top or bottom edge of bars, the equalizer
 or a space to resize it. Every change is applied at once and the dashboard keeps it.
@@ -111,7 +112,8 @@ PANEL_BODY = _rgb("#121110")
 
 
 class PanelCanvas(Gtk.DrawingArea):
-    """Both modules, LED for LED, with an outline around each widget.
+    """The modules the dashboard drives (both, or one), LED for LED, with an outline around
+    each widget.
 
     Sides here are physical: "left" is the module left of the keyboard. The window maps them
     to the layout (they differ while the panels are swapped) and decides what a drag does:
@@ -132,15 +134,14 @@ class PanelCanvas(Gtk.DrawingArea):
         self._plan = plan
         self._on_drop = on_drop
         self._on_resize = on_resize
+        self._sides: tuple[str, ...] = SIDES
         self._frames: dict[str, FramePixels] | None = None
         self._widgets: dict[str, tuple[Widget, ...]] = {side: () for side in SIDES}
         self._selected: tuple[str, int] | None = None
         self._hover: tuple[str, int] | None = None
         self._drag: dict[str, object] | None = None
         self._target: tuple[str, tuple, int] | None = None  # side, plan, height
-        self.set_size_request(
-            2 * MARGIN + 2 * PANEL_WIDTH + GAP, MARGIN + PANEL_HEIGHT + LABEL_HEIGHT + 4
-        )
+        self._fit()
         self.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
@@ -157,6 +158,22 @@ class PanelCanvas(Gtk.DrawingArea):
     def dragging(self) -> bool:
         return self._drag is not None
 
+    def show_sides(self, sides: tuple[str, ...]) -> None:
+        """Draw only these modules: both, or the one a laptop with a single module has."""
+        if sides == self._sides:
+            return
+        self._sides = sides
+        self._hover = self._drag = self._target = None
+        self._fit()
+        self.queue_draw()
+
+    def _fit(self) -> None:
+        count = len(self._sides)
+        self.set_size_request(
+            2 * MARGIN + count * PANEL_WIDTH + (count - 1) * GAP,
+            MARGIN + PANEL_HEIGHT + LABEL_HEIGHT + 4,
+        )
+
     def show_frames(self, frames: dict[str, FramePixels] | None) -> None:
         self._frames = frames
         self.queue_draw()
@@ -170,18 +187,17 @@ class PanelCanvas(Gtk.DrawingArea):
 
     # geometry ------------------------------------------------------------------------------
 
-    @staticmethod
-    def _panel_x(side: str) -> float:
-        return MARGIN + (0 if side == "left" else PANEL_WIDTH + GAP)
+    def _panel_x(self, side: str) -> float:
+        return MARGIN + self._sides.index(side) * (PANEL_WIDTH + GAP)
 
     def _side_at(self, x: float, *, nearest: bool = False) -> str | None:
-        for side in SIDES:
+        for side in self._sides:
             left = self._panel_x(side)
             if left - 6 <= x <= left + PANEL_WIDTH + 6:
                 return side
         if not nearest:
             return None
-        return "left" if x < MARGIN + PANEL_WIDTH + GAP / 2 else "right"
+        return min(self._sides, key=lambda side: abs(x - self._panel_x(side) - PANEL_WIDTH / 2))
 
     @staticmethod
     def _row(y: float) -> float:
@@ -305,7 +321,7 @@ class PanelCanvas(Gtk.DrawingArea):
     def _draw(self, _area: Gtk.DrawingArea, cr) -> bool:  # cr: cairo.Context
         accent = self._accent()
         text = self.get_style_context().get_color(Gtk.StateFlags.NORMAL)
-        for side in SIDES:
+        for side in self._sides:
             x0 = self._panel_x(side)
             _rounded(cr, x0 - 7, MARGIN - 7, PANEL_WIDTH + 14, PANEL_HEIGHT + 14, 8)
             cr.set_source_rgb(*PANEL_BODY)
@@ -329,7 +345,8 @@ class PanelCanvas(Gtk.DrawingArea):
                     cr.fill()
             self._draw_outlines(cr, side, x0, accent)
             self._draw_target(cr, side, x0, accent)
-            layout = self.create_pango_layout(f"{side.capitalize()} module")
+            name = f"{side.capitalize()} module" if len(self._sides) > 1 else "Module"
+            layout = self.create_pango_layout(name)
             width, _height = layout.get_pixel_size()
             cr.move_to(x0 + (PANEL_WIDTH - width) / 2, MARGIN + PANEL_HEIGHT + 10)
             cr.set_source_rgba(text.red, text.green, text.blue, 0.7)
@@ -396,6 +413,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         super().__init__(application=application, title="LED Matrix")
         self._client = client
         self._settings: DisplaySettings | None = None
+        self._sides: tuple[str, ...] = SIDES  # the modules the dashboard drives: both, or one
         self._layout: Layout | None = None
         self._selected: Selection | None = None
         self._updating = False
@@ -454,7 +472,7 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self._swap = Gtk.Switch(valign=Gtk.Align.CENTER)
         self._swap.set_tooltip_text(SWAP_HINT)
         self._swap.connect("notify::active", self._on_switch, "swap_panels")
-        swap_label = Gtk.Label(label="Swap panels")
+        self._swap_label = swap_label = Gtk.Label(label="Swap panels")
         swap_label.set_tooltip_text(SWAP_HINT)
         row.pack_start(title, False, False, 0)
         row.pack_start(self._power, False, False, 0)
@@ -621,10 +639,11 @@ class SettingsWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         physical = self._physical(side)
         towards = "go-next-symbolic" if physical == "left" else "go-previous-symbolic"
+        across = (towards, f"Move to the {other_side(physical)} module", True, self._move_across)
         for icon, tooltip, enabled, action in (
             ("go-up-symbolic", "Move up", index > 0, lambda: self._move_by(-1)),
             ("go-down-symbolic", "Move down", index < count - 1, lambda: self._move_by(1)),
-            (towards, f"Move to the {other_side(physical)} module", True, self._move_across),
+            *((across,) if len(self._sides) > 1 else ()),
             ("user-trash-symbolic", "Remove (Delete)", True, self._remove_selected),
         ):
             button = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
@@ -678,6 +697,13 @@ class SettingsWindow(Gtk.ApplicationWindow):
         ) or settings.audio_source != self._settings.audio_source or (
             settings.cpu_alert_celsius != self._settings.cpu_alert_celsius
         )
+        sides = self._client.panels
+        if sides != self._sides:
+            self._sides = sides
+            self._canvas.show_sides(sides)
+            relayout = True
+        for control in (self._swap_label, self._swap):  # one module: nothing to swap
+            control.set_visible(len(sides) > 1)
         self._settings = settings
         self._layout = settings.layout
         self._updating = True
@@ -685,7 +711,9 @@ class SettingsWindow(Gtk.ApplicationWindow):
         self._brightness.set_value(max(1, settings.brightness_percent))
         self._swap.set_active(settings.swap_panels)
         self._updating = False
-        if self._selected_widget() is None:
+        if self._selected_widget() is None or (
+            self._physical(self._selected[0]) not in sides  # type: ignore[index]
+        ):
             self._selected = None
         if relayout:
             self._show_layout()
@@ -712,10 +740,10 @@ class SettingsWindow(Gtk.ApplicationWindow):
 
     def _target_side(self) -> tuple[str, int]:
         """Layout side and index where an added widget goes: below the selected one, else at
-        the end of the left module."""
+        the end of the left module (of the only module, if there is one)."""
         if self._selected is not None:
             return self._selected[0], self._selected[1] + 1
-        side = self._physical("left")
+        side = self._physical(self._sides[0])
         return side, len(self._layout.side(side))  # type: ignore[union-attr]
 
     def _update_add_buttons(self) -> None:
@@ -725,11 +753,24 @@ class SettingsWindow(Gtk.ApplicationWindow):
         for kind, button in self._add_buttons.items():
             reason = can_add(self._layout, side, kind)
             button.set_sensitive(reason is None)
-            button.set_tooltip_text(reason or f"Add to the {self._physical(side)} module")
+            button.set_tooltip_text(reason or f"Add to {self._module_name(self._physical(side))}")
         where = "below the selected widget" if self._selected is not None else "at the bottom"
-        self._add_hint.set_text(f"Adds to the {self._physical(side)} module, {where}.")
-        rows = {side: free_rows(self._layout.side(self._physical(side))) for side in SIDES}
-        self._free.set_text(f"Free rows: left module {rows['left']}, right module {rows['right']}")
+        if len(self._sides) > 1:
+            self._add_hint.set_text(f"Adds to the {self._physical(side)} module, {where}.")
+        else:
+            self._add_hint.set_text(f"Adds {where}.")
+        rows = {side: free_rows(self._layout.side(self._physical(side))) for side in self._sides}
+        self._free.set_text(
+            "Free rows: "
+            + (
+                ", ".join(f"{side} module {rows[side]}" for side in self._sides)
+                if len(self._sides) > 1
+                else str(rows[self._sides[0]])
+            )
+        )
+
+    def _module_name(self, physical: str) -> str:
+        return f"the {physical} module" if len(self._sides) > 1 else "the module"
 
     # edits ---------------------------------------------------------------------------------
 
@@ -951,7 +992,11 @@ class SettingsWindow(Gtk.ApplicationWindow):
             buttons=Gtk.ButtonsType.NONE,
             text="Reset the layout?",
         )
-        dialog.format_secondary_text("Both modules go back to the widgets they start with.")
+        dialog.format_secondary_text(
+            "Both modules go back to the widgets they start with."
+            if len(self._sides) > 1
+            else "The module goes back to the widgets it starts with."
+        )
         dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Reset", Gtk.ResponseType.OK)
         answer = dialog.run()
         dialog.destroy()

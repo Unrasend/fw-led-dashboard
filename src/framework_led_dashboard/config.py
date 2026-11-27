@@ -86,13 +86,14 @@ def load_config(path: str | Path) -> DashboardConfig:
     return parse_config(raw)
 
 
-def fill_panel_identities(template: str, *, left: str, right: str) -> str:
-    """Return `template` (TOML text) with the identity lines of both panel sections replaced.
+def fill_panel_identities(template: str, *, left: str, right: str | None) -> str:
+    """Return `template` (TOML text) with the identity lines of both panel sections replaced;
+    without a `right` module that identity is left empty.
 
     Works on text so the template's comments and layout survive; the result is validated.
     """
     lines = template.splitlines(keepends=True)
-    wanted = {"panels.left": left, "panels.right": right}
+    wanted = {"panels.left": left, "panels.right": right or ""}
     section = None
     for index, line in enumerate(lines):
         stripped = line.strip()

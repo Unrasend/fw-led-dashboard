@@ -299,6 +299,7 @@ def test_handle_request_reports_and_changes_settings() -> None:
         "cpu_alert_celsius": 120,
         "layout": DEFAULT_LAYOUT.to_json(),
         "audio_source": "microphone",
+        "panels": ["left", "right"],
     }
     assert (
         handle_request(store, {"command": "set", "brightness_percent": 65})["brightness_percent"]
@@ -323,6 +324,48 @@ def test_frames_are_sent_as_hex_and_come_back_unchanged() -> None:
     assert response["ok"] is True
     assert {side: decode_frame(response[side]) for side in ("left", "right")} == FRAMES
     assert len(encode_frame(FRAMES["left"])) == 2 * FRAME_WIDTH * FRAME_HEIGHT
+
+
+def test_a_dashboard_with_one_module_names_it_and_sends_only_its_frame() -> None:
+    store = SettingsStore(DisplaySettings(40))
+    only_right = {"right": FRAMES["right"]}
+
+    status = handle_request(store, {"command": "status"}, panels=("right",))
+    changed = handle_request(store, {"command": "set", "enabled": False}, panels=("right",))
+    frames = handle_request(
+        store, {"command": "frames"}, frames=lambda: only_right, panels=("right",)
+    )
+
+    assert status["panels"] == changed["panels"] == ["right"]
+    assert frames == {"ok": True, "right": encode_frame(FRAMES["right"])}
+
+
+def test_client_learns_which_modules_the_dashboard_drives(short_dir: Path) -> None:
+    store = SettingsStore(DisplaySettings(40))
+    path = short_dir / "one.sock"
+    server = ControlServer(
+        store,
+        path=path,
+        frames=lambda: {"left": FRAMES["left"]},
+        panels=("left",),
+        accept_timeout_seconds=0.05,
+    )
+    server.open()
+    stop = threading.Event()
+    thread = threading.Thread(target=run_loop, args=(server.step, stop), kwargs={"name": "control"})
+    thread.start()
+    try:
+        client = ControlClient(path)
+        assert client.panels == ("left", "right")  # until the dashboard says otherwise
+        client.status()
+        assert client.panels == ("left",)
+        assert client.set(brightness_percent=70) == DisplaySettings(70)
+        assert client.panels == ("left",)
+        assert client.frames() == {"left": FRAMES["left"]}
+    finally:
+        stop.set()
+        thread.join(2.0)
+        server.close()
 
 
 def test_frames_need_a_dashboard_that_renders_them() -> None:
@@ -392,6 +435,7 @@ def test_client_and_server_round_trip(
         audio_source="system",
     )
     assert client.frames() == FRAMES
+    assert client.panels == ("left", "right")
 
 
 def test_client_surfaces_rejected_request(

@@ -229,6 +229,7 @@ class XembedTray:
         self._unreachable.set_visible(not reachable)
         for item in (self._power, self._brightness, self._swap):
             item.set_sensitive(reachable)
+        self._swap.set_visible(len(self._client.panels) > 1)  # one module: nothing to swap
         state, title, description = tray_summary(settings)
         self._set_icon(state, f"{title}\n{description}")
         if settings is None:
@@ -345,7 +346,10 @@ class SniTray:
         self._settings = settings
         state, title, description = tray_summary(settings)
         self._tray.update(
-            state=state, title=title, description=description, menu=build_menu(settings, self)
+            state=state,
+            title=title,
+            description=description,
+            menu=build_menu(settings, self, swap=len(self._client.panels) > 1),
         )
 
     # dbusmenu.MenuActions
